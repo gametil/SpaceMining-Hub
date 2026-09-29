@@ -449,8 +449,90 @@ local Window = WindUI:CreateWindow({
 	Folder = "SpaceMiningHub",
 	Icon = "pickaxe",
 	Theme = "Dark",
+	Author = "Script made by Zodex",
 	Size = UDim2.fromOffset(580, 460),
+	OpenButton = {
+		Title = "Space Mining Hub",
+		CornerRadius = UDim.new(1, 0),
+		Enabled = true, -- the reopen "square" after minimize/close
+	},
 })
+
+-- Right Control reopens the UI (requirement: "press right Control -> opens UI")
+Window:SetToggleKey(Enum.KeyCode.RightControl)
+
+----------------------------------------------------------------
+-- INFO (top tab): script credit, server name, Discord server
+----------------------------------------------------------------
+local INFO = {
+	Author = "Script made by Zodex",
+	ServerName = "\U{1D400}\U{1D402}\U{1D414}\U{1D412}\U{1D40E}\U{1D412} (AETOS)",
+	DiscordInvite = "discord.gg/YazKRj4hWa",
+	DiscordUrl = "https://discord.gg/YazKRj4hWa",
+}
+
+local InfoTab = Window:Tab({ Title = "Info", Icon = "info" })
+
+InfoTab:Section({ Title = "\U{1F4A3} Script made by Zodex" })
+InfoTab:Paragraph({
+	Title = "Script made by Zodex",
+	Desc = "Pet Simulator 99 - Space Mining Event hub. Mining, merchant, and the 7 data-verified explosives.",
+})
+InfoTab:Paragraph({
+	Title = "Server: " .. INFO.ServerName,
+	Desc = "Discord: " .. INFO.DiscordInvite,
+})
+InfoTab:Button({
+	Title = "Open Discord Server",
+	Icon = "message-circle",
+	Callback = function()
+		pcall(function()
+			setclipboard(INFO.DiscordUrl)
+		end)
+		WindUI:Notify({
+			Title = "Discord",
+			Content = INFO.DiscordInvite .. " (copied to clipboard)",
+			Duration = 4,
+			Icon = "message-circle",
+		})
+	end,
+})
+InfoTab:Paragraph({
+	Title = "Reopen UI: Right Control",
+	Desc = "Minimize/close leaves the reopen square; press Right Control or click it to reopen. The red square fully closes the script.",
+})
+
+----------------------------------------------------------------
+-- TOPBAR SQUARES: yellow = minimize (reopenable), red = full close
+----------------------------------------------------------------
+local hubMinimize = function()
+	Window:Close() -- minimizes; the OpenButton square + Right Control reopen it
+end
+
+local hubClose = function()
+	-- full teardown: stop every loop, then destroy the window
+	CFG.AutoMine = false
+	CFG.AutoBuyBombs = false
+	CFG.AntiAFK = false
+	CFG.AutoHatch = false
+	CFG.AutoClaimPickaxe = false
+	CFG.AutoBuyZone = false
+	pcall(function()
+		for key in BombManager.State do
+			BombManager.SetEnabled(key, false)
+		end
+	end)
+	pcall(function()
+		if mineThread then
+			task.cancel(mineThread :: thread)
+			mineThread = nil
+		end
+	end)
+	Window:Destroy()
+end
+
+Window:CreateTopbarButton("Minimize", "minus", hubMinimize, 998, nil, Color3.fromHex("#f5c451"))
+Window:CreateTopbarButton("Close", "x", hubClose, 999, nil, Color3.fromHex("#ff4830"))
 
 -- Tab: EVENTS
 local EventsTab = Window:Tab({ Title = "Events", Icon = "sparkles" })
