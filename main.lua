@@ -1,5 +1,5 @@
 --!nonstrict
--- Space Mining Hub (PS99) — standalone loadstring build
+-- Space Mining Hub (PS99) - standalone loadstring build
 -- Usage:
 --   loadstring(game:HttpGet('https://raw.githubusercontent.com/gametil/SpaceMining-Hub/refs/heads/main/main.lua'))()
 --
@@ -462,44 +462,63 @@ local Window = WindUI:CreateWindow({
 Window:SetToggleKey(Enum.KeyCode.RightControl)
 
 ----------------------------------------------------------------
--- INFO (top tab): script credit, server name, Discord server
+-- INFO (top tab) — script credit, server, Discord
+-- ENCODING RULE (global): NEVER use \U{...} / \u{...} escapes in Luau strings.
+-- Luau does not parse them (it only knows \n 	 \\ \" \ddd) and they render on
+-- screen as literal "U{...}" garbage. Write real UTF-8 characters directly.
 ----------------------------------------------------------------
 local INFO = {
 	Author = "Script made by Zodex",
-	ServerName = "\U{1D400}\U{1D402}\U{1D414}\U{1D412}\U{1D40E}\U{1D412} (AETOS)",
+	ServerName = "AETOS",
 	DiscordInvite = "discord.gg/YazKRj4hWa",
 	DiscordUrl = "https://discord.gg/YazKRj4hWa",
 }
 
 local InfoTab = Window:Tab({ Title = "Info", Icon = "info" })
 
-InfoTab:Section({ Title = "\U{1F4A3} Script made by Zodex" })
+-- Card 1: script information
+InfoTab:Paragraph({
+	Title = "Space Mining Event Hub",
+	Desc = "Pet Simulator 99 - Space Mining Event Hub.\nMining, merchant, and explosive systems.",
+})
+
+-- Card 2: script author
 InfoTab:Paragraph({
 	Title = "Script made by Zodex",
-	Desc = "Pet Simulator 99 - Space Mining Event hub. Mining, merchant, and the 7 data-verified explosives.",
+	Desc = "Script author and developer.",
 })
+
+-- Card 3: server
 InfoTab:Paragraph({
-	Title = "Server: " .. INFO.ServerName,
-	Desc = "Discord: " .. INFO.DiscordInvite,
+	Title = "Server",
+	Desc = INFO.ServerName,
+})
+
+-- Card 4: Discord server
+InfoTab:Paragraph({
+	Title = "Discord Server",
+	Desc = INFO.DiscordInvite,
 })
 InfoTab:Button({
 	Title = "Open Discord Server",
 	Icon = "message-circle",
+	IconAlign = "Left",
+	Justify = "Center",
 	Callback = function()
-		pcall(function()
-			setclipboard(INFO.DiscordUrl)
-		end)
+		pcall(setclipboard, INFO.DiscordUrl)
 		WindUI:Notify({
-			Title = "Discord",
+			Title = "Discord Server",
 			Content = INFO.DiscordInvite .. " (copied to clipboard)",
 			Duration = 4,
 			Icon = "message-circle",
 		})
 	end,
 })
+
+-- Card 5: reopen UI
 InfoTab:Paragraph({
-	Title = "Reopen UI: Right Control",
-	Desc = "Minimize/close leaves the reopen square; press Right Control or click it to reopen. The red square fully closes the script.",
+	Title = "Reopen UI",
+	Desc = "Hotkey: Right Control\nPress Right Control or click the reopen button to show the UI again.",
 })
 
 ----------------------------------------------------------------
