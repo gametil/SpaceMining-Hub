@@ -1,7 +1,7 @@
 --!nonstrict
 -- Space Mining Hub (PS99) — standalone loadstring build
 -- Usage:
---   loadstring(game:HttpGet('https://raw.githubusercontent.com/<owner>/<repo>/refs/heads/main/main.lua'))()
+--   loadstring(game:HttpGet('https://raw.githubusercontent.com/gametil/SpaceMining-Hub/refs/heads/main/main.lua'))()
 --
 -- STATE shim: under Real's live-reload, STATE (alive/onCleanup) is injected and this is
 -- skipped. Standalone (HttpGet loadstring) we provide a minimal fallback so cleanup
@@ -62,6 +62,7 @@ local CFG = {
 	AutoClaimPickaxe = false,
 	AutoBuyZone = false,
 	AutoBuyBombs = false,
+	AntiAFK = false,
 	TickRate = 0.5,
 }
 
@@ -596,6 +597,28 @@ ExtraTab:Toggle({
 })
 
 ExtraTab:Toggle({
+	Title = "Anti-AFK",
+	Desc = "Jumps every 5 min (VirtualInputManager Space key)",
+	Value = false,
+	Callback = function(v)
+		CFG.AntiAFK = v
+		if v then
+			task.spawn(function()
+				local VIM = game:GetService("VirtualInputManager")
+				while STATE.alive() and CFG.AntiAFK do
+					pcall(function()
+						VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+						task.wait(0.2)
+						VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+					end)
+					task.wait(300)
+				end
+			end)
+		end
+	end,
+})
+
+ExtraTab:Toggle({
 	Title = "Auto Buy Bombs (Merchant)",
 	Value = false,
 	Callback = function(v)
@@ -664,6 +687,7 @@ end)
 STATE.onCleanup(function()
 	CFG.AutoMine = false
 	CFG.AutoBuyBombs = false
+	CFG.AntiAFK = false
 	CFG.AutoHatch = false
 	CFG.AutoClaimPickaxe = false
 	CFG.AutoBuyZone = false
