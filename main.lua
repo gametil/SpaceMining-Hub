@@ -1,23 +1,18 @@
 --!nonstrict
--- Space Mining Hub (PS99) - standalone loadstring build
--- Usage:
---   loadstring(game:HttpGet('https://raw.githubusercontent.com/gametil/SpaceMining-Hub/refs/heads/main/main.lua'))()
---
--- STATE shim: under Real's live-reload, STATE (alive/onCleanup) is injected and this is
--- skipped. Standalone (HttpGet loadstring) we provide a minimal fallback so cleanup
--- registration and loops still work.
+-- Space Mining Hub (PS99) — standalone loadstring build
+-- Author: Script made by Zodex
+-- Server: AETOS | Discord: discord.gg/YazKRj4hWa
 
-if STATE == nil then
-	local cleanups = {}
-	STATE = {
-		alive = function()
-			return true
-		end,
-		onCleanup = function(fn)
-			table.insert(cleanups, fn)
-		end,
-	}
-end
+local STATE = { alive = function() return _G.SPACE_MINING_LIVE end }
+_G.SPACE_MINING_LIVE = true
+
+------------------------------------------------------------------
+-- SpaceMiningHub.luau — Space Mining Event hub (PS99, placeId 8737899170)
+-- WindUI 1.6.x + SpaceMiningManager + BombManager in ONE live-reload script.
+-- Label: "space-mining" (use real_live-reload filePath + label; never execute twice)
+-- All remotes verified from decompiled sources (research/SPACE_MINING_RESEARCH.md)
+------------------------------------------------------------------
+STATE = STATE -- provided by live-reload (static-analysis false positive, ignore)
 
 -- Services
 local Players = game:GetService("Players")
@@ -176,7 +171,10 @@ function SM.SelectTarget(ores: {OreEntry}): OreEntry?
 end
 
 ----------------------------------------------------------------
--- ACTION CONTROLLER: PV_Latch -> HW_Flush -> SimulateBreak
+-- ACTION CONTROLLER (manual single-hit helper)
+-- NOTE: the game's real "Auto Mine" does NOT fire per-block remotes from the
+-- client — see AUTO MINE below (AutoMineCmds.Enable + "EK_Arm"; the SERVER mines).
+-- These remotes are only used for manual single-hit assist.
 ----------------------------------------------------------------
 local function posString(pos: Vector3): string
 	return string.format("%d, %d, %d", math.floor(pos.X + 0.5), math.floor(pos.Y + 0.5), math.floor(pos.Z + 0.5))
@@ -194,33 +192,64 @@ function SM.MineOnce(target: OreEntry)
 end
 
 ----------------------------------------------------------------
--- AUTO MINE LOOP
+-- AUTO MINE (REAL mechanism, decompiled from "Scripts.Game.Auto Mine" docId 175):
+--   enable  = ToolUtil.GetSelectedTool(lp,"Pickaxe") check -> AutoMineCmds.Enable() -> Network.Fire("EK_Arm")
+--   disable = AutoMineCmds.Disable() -> Network.Fire("UB_Idle")
+-- The SERVER does the actual mining (pet damage: InstanceDamageModules.SpaceMiningEvent).
+-- Guards mirrored from the game: requires an equipped pickaxe, and the game itself
+-- disables auto mine on WASD movement / hoverboard — so we watchdog re-arm it
+-- while the toggle stays ON.
 ----------------------------------------------------------------
+local AutoMineCmds = safeRequire("game.ReplicatedStorage.Library.Client.AutoMineCmds")
+local ToolUtil = safeRequire("game.ReplicatedStorage.Library.Util.ToolUtil")
+
 local mineThread: thread? = nil
+
+local function autoMineEnable(): (boolean, string)
+	if not ToolUtil.GetSelectedTool(lp, "Pickaxe") then
+		return false, "You need a pickaxe equipped!"
+	end
+	pcall(function()
+		AutoMineCmds.Enable()
+	end)
+	Network.Fire("EK_Arm")
+	return true, "Auto mine enabled"
+end
+
+local function autoMineDisable()
+	pcall(function()
+		AutoMineCmds.Disable()
+	end)
+	Network.Fire("UB_Idle")
+end
 
 function SM.SetAutoMine(enabled: boolean)
 	CFG.AutoMine = enabled
 	if enabled and not mineThread then
+		local ok, msg = autoMineEnable()
+		if not ok and notifyOn then
+			WindUI:Notify({ Title = "Auto Mining", Content = msg, Duration = 3, Icon = "pickaxe" })
+		end
 		mineThread = task.spawn(function()
 			while STATE.alive() and CFG.AutoMine do
 				if SM.IsInEvent() then
-					local ok, err = pcall(function()
-						local target = SM.SelectTarget(SM.ScanOres())
-						if target then
-							SM.MineOnce(target)
+					pcall(function()
+						-- watchdog: re-arm if the game auto-disabled (movement/hoverboard)
+						if not AutoMineCmds.IsEnabled() then
+							autoMineEnable()
 						end
 					end)
-					if not ok then
-						warn("[SpaceMining] " .. tostring(err))
-					end
 				end
-				task.wait(CFG.TickRate)
+				task.wait(2)
 			end
 			mineThread = nil
 		end)
-	elseif not enabled and mineThread then
-		task.cancel(mineThread :: thread)
-		mineThread = nil
+	elseif not enabled then
+		if mineThread then
+			task.cancel(mineThread :: thread)
+			mineThread = nil
+		end
+		autoMineDisable()
 	end
 end
 
