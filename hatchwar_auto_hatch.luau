@@ -63,6 +63,8 @@ local HatchWar = require(Library.Types.HatchWar)
 local stats = { arms = 0, batch = 0 }
 local startHatched = nil
 local lastErr = ""
+local hatchBlocked = false -- permission-locked egg; cleared when the egg selection changes
+local stopHandled = false  -- "" stop mode: game auto hatch already disabled once
 
 local function log(msg)
 	print("[AutoHatch] " .. msg)
@@ -184,29 +186,15 @@ local function hatchOnce(uid)
 	return false, tostring(msg or "unknown error")
 end
 
--- stop mode: CONFIG.Egg = "" disables the game's auto hatch and exits
-if CONFIG.Egg == "" or CONFIG.Egg == "none" then
-	pcall(function()
-		HatchingCmds.StopHatching()
-	end)
-	pcall(function()
-		HatchingCmds.ForceDisable(Hatching.Options.AUTO)
-	end)
-	log("stopped: auto hatch disabled")
-	return
-end
-
-if Directory.Eggs[CONFIG.Egg] == nil then
-	log(("unknown egg '%s' - use: Ember Egg, Spore Egg, Graveyard Egg, Witching Egg"):format(tostring(CONFIG.Egg)))
-	return
-end
+-- stop mode (CONFIG.Egg = "") and unknown eggs are handled live in the arm loop
+-- below, so the UI can switch eggs at runtime instead of the script exiting.
 
 -- arm loop: keep the game's Auto Hatch chain pointed at the chosen egg
 task.spawn(function()
 	local nextArmAt = 0
-	local stopped = false
 	local missingSince = nil
-	while isAlive() and not stopped do
+	local unknownLogged = nil
+	while isAlive() do
 		task.wait(0.5)
 		if not inEvent() then
 			if CONFIG.AutoJoin then
@@ -216,6 +204,36 @@ task.spawn(function()
 				end)
 				task.wait(6)
 			end
+			continue
+		end
+		if CONFIG.Egg == "" or CONFIG.Egg == "none" then
+			if not stopHandled then
+				stopHandled = true
+				pcall(function()
+					HatchingCmds.StopHatching()
+				end)
+				pcall(function()
+					HatchingCmds.ForceDisable(Hatching.Options.AUTO)
+				end)
+				log("stopped: auto hatch disabled - pick an egg in the UI to resume")
+			end
+			continue
+		end
+		if stopHandled then
+			stopHandled = false
+			log("resumed: egg = " .. CONFIG.Egg)
+		end
+		if Directory.Eggs[CONFIG.Egg] == nil then
+			if unknownLogged ~= CONFIG.Egg then
+				unknownLogged = CONFIG.Egg
+				log(("unknown egg '%s' - use: Ember Egg, Spore Egg, Graveyard Egg, Witching Egg"):format(tostring(CONFIG.Egg)))
+			end
+			task.wait(2)
+			continue
+		end
+		unknownLogged = nil
+		if hatchBlocked then
+			task.wait(1)
 			continue
 		end
 		local uid = eggUid()
@@ -260,8 +278,8 @@ task.spawn(function()
 				log("attempt failed: " .. err)
 			end
 			if err:find("permission") then
-				log(("STOPPED: '%s' is locked for this account - beat more bosses / progress the event, then re-run"):format(CONFIG.Egg))
-				stopped = true
+				log(("BLOCKED: '%s' is locked for this account - beat more bosses / progress the event, or switch eggs in the UI"):format(CONFIG.Egg))
+				hatchBlocked = true
 			elseif err:find("too far") then
 				nextArmAt = os.clock() + 1
 			elseif err:find("too quickly") then
@@ -291,6 +309,191 @@ task.spawn(function()
 	end
 end)
 
-log(("loaded: egg=%s tp=%s maxHatch=%d price=%d"):format(
-	CONFIG.Egg, tostring(CONFIG.TeleportToEgg),
-	eggMaxHatch(Directory.Eggs[CONFIG.Egg]), eggPrice(Directory.Eggs[CONFIG.Egg])))
+do
+	local dir = Directory.Eggs[CONFIG.Egg]
+	if dir then
+		log(("loaded: egg=%s tp=%s maxHatch=%d price=%d"):format(
+			CONFIG.Egg, tostring(CONFIG.TeleportToEgg), eggMaxHatch(dir), eggPrice(dir)))
+	else
+		log(("loaded: egg=%s (stopped/unknown - pick one in the UI) tp=%s"):format(
+			tostring(CONFIG.Egg), tostring(CONFIG.TeleportToEgg)))
+	end
+end
+
+-- === Maclib UI: pick the event egg and control the hatcher live ===
+-- All callbacks mutate the live CONFIG of THIS run, so changes apply on the next tick.
+-- The window is purely a controller: if Maclib fails to load, hatching keeps running.
+task.spawn(function()
+	local ok, err = pcall(function()
+		local MacLib = loadstring(game:HttpGet("https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt"))()
+		if not MacLib then
+			error("Maclib loadstring returned nil")
+		end
+
+		local EGG_LIST = { "Ember Egg", "Spore Egg", "Graveyard Egg", "Witching Egg", "Stop" }
+		local function eggIndex(name)
+			for i, e in ipairs(EGG_LIST) do
+				if e == name then
+					return i
+				end
+			end
+			return #EGG_LIST
+		end
+
+		-- close a window left over from a previous run of this script
+		if G and G.AutoHatchWindow then
+			pcall(function()
+				G.AutoHatchWindow:Unload()
+			end)
+		end
+
+		local Window = MacLib:Window({
+			Title = "Hatch Wars Auto",
+			Subtitle = "Egg Hatcher",
+			Size = UDim2.fromOffset(740, 560),
+			DragStyle = 1,
+			DisabledWindowControls = {},
+			ShowUserInfo = true,
+			Keybind = Enum.KeyCode.RightControl,
+			AcrylicBlur = false, -- off: acrylic blur can be detected
+		})
+		if G then
+			G.AutoHatchWindow = Window
+		end
+
+		local TabGroup = Window:TabGroup()
+		local MainTab = TabGroup:Tab({ Name = "Hatch" })
+		local SettingsTab = TabGroup:Tab({ Name = "Settings" })
+		local Left = MainTab:Section({ Side = "Left" })
+		local Right = MainTab:Section({ Side = "Right" })
+
+		local function setEgg(Value)
+			local egg = (Value == "Stop") and "" or Value
+			if egg == CONFIG.Egg then
+				return
+			end
+			CONFIG.Egg = egg
+			hatchBlocked = false
+			lastErr = ""
+			if egg == "" or egg == "none" then
+				log("UI: hatching stopped (game auto hatch disables on the next tick)")
+				pcall(function()
+					Window:Notify({ Title = "Hatch Wars Auto", Description = "Hatching stopped", Lifetime = 3 })
+				end)
+			else
+				pcall(function()
+					HatchingCmds.StopHatching() -- drop the previous egg's chain
+				end)
+				log("UI: egg = " .. egg)
+				pcall(function()
+					Window:Notify({ Title = "Hatch Wars Auto", Description = "Egg: " .. egg, Lifetime = 3 })
+				end)
+			end
+		end
+
+		Left:Header({ Text = "Event Egg" })
+		Left:Dropdown({
+			Name = "Which egg to hatch",
+			Multi = false,
+			Required = true,
+			Options = EGG_LIST,
+			Default = eggIndex(CONFIG.Egg),
+			Callback = function(Value)
+				setEgg(tostring(Value))
+			end,
+		}, "EggSelect")
+
+		Left:Divider()
+		Left:Header({ Text = "Live Status" })
+		local statusPara = Left:Paragraph({
+			Header = "Status",
+			Body = "starting...",
+		})
+
+		Right:Header({ Text = "Automation" })
+		Right:Toggle({
+			Name = "Auto join event",
+			Default = CONFIG.AutoJoin,
+			Callback = function(Value)
+				CONFIG.AutoJoin = Value
+				log("UI: auto join " .. (Value and "ON" or "OFF"))
+			end,
+		}, "AutoJoin")
+		Right:Toggle({
+			Name = "Teleport to egg",
+			Default = CONFIG.TeleportToEgg,
+			Callback = function(Value)
+				CONFIG.TeleportToEgg = Value
+				log("UI: egg teleport " .. (Value and "ON" or "OFF"))
+			end,
+		}, "TeleportToEgg")
+		Right:Slider({
+			Name = "Retry delay on error (s)",
+			Default = CONFIG.RestartDelay,
+			Minimum = 1,
+			Maximum = 10,
+			DisplayMethod = "Value",
+			Precision = 0,
+			Callback = function(Value)
+				CONFIG.RestartDelay = math.floor(Value)
+			end,
+		}, "RestartDelay")
+		Right:Slider({
+			Name = "Wait when broke (s)",
+			Default = CONFIG.NoCoinsDelay,
+			Minimum = 5,
+			Maximum = 30,
+			DisplayMethod = "Value",
+			Precision = 0,
+			Callback = function(Value)
+				CONFIG.NoCoinsDelay = math.floor(Value)
+			end,
+		}, "NoCoinsDelay")
+
+		local function statusBody()
+			local sv = Save.Get()
+			local hatched = (sv and sv.EggsHatched) or 0
+			local coins = CurrencyCmds.Get(HatchWar.COIN) or 0
+			local egg = (CONFIG.Egg == "" or CONFIG.Egg == "none") and "STOPPED" or CONFIG.Egg
+			local body = ("Egg: %s\nHatching: %s\nHatched: +%d (total %s)\nCoins: %s\nArms: %d\nLast error: %s"):format(
+				egg, tostring(HatchingCmds.IsHatching()), hatched - (startHatched or hatched),
+				short(hatched), short(coins), stats.arms,
+				lastErr ~= "" and lastErr or "-")
+			if hatchBlocked then
+				body ..= "\nBLOCKED: this egg is locked - switch eggs in the dropdown"
+			end
+			return body
+		end
+
+		MacLib:SetFolder("HatchWarsAuto")
+		SettingsTab:InsertConfigSection("Left")
+		MainTab:Select()
+		pcall(function()
+			MacLib:LoadAutoLoadConfig()
+		end)
+
+		task.spawn(function()
+			while task.wait(1) do
+				if not isAlive() then
+					break
+				end
+				local bodyOk, body = pcall(statusBody)
+				if bodyOk and statusPara then
+					pcall(function()
+						statusPara:UpdateBody(body)
+					end)
+				end
+			end
+		end)
+
+		Window.onUnloaded(function()
+			statusPara = nil
+			log("UI closed - hatching keeps running; re-execute the script to reopen the window")
+		end)
+
+		log("UI loaded - RightControl shows/hides the window (egg selector + live status)")
+	end)
+	if not ok then
+		log("UI failed to load (hatching keeps running): " .. tostring(err))
+	end
+end)
