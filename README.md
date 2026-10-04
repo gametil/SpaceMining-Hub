@@ -1,43 +1,44 @@
-# Space Mining Hub (PS99)
+# PS99 Hatch Wars Scripts
 
-Space Mining Event automation for Pet Simulator 99 — WindUI hub with mining, merchant, and the 7 **data-verified** explosives.
+One-line description: auto boss fighter + event egg auto-hatcher for the "Hatch Wars" event in Pet Simulator 99 (placeId 8737899170).
 
-## Quick start
+## How to run
+Paste either file into any Lua executor that supports Luau (Synapse, Wave, Real, etc.) while in the game, then execute. Re-executing a script stops its previous run (safe to restart).
 
-```lua
-loadstring(game:HttpGet('https://raw.githubusercontent.com/<owner>/SpaceMining-Hub/refs/heads/main/main.lua'))()
-```
+## hatchwar_auto_boss.luau
+- **What it does**: Auto-starts boss fights and instantly taps every fight circle ("Tap to hatch faster!" bars). Teleports to the boss first (server requires ~12 studs).
+- **CONFIG options**:
+  - TapsPerSecond: 12 (server counts up to 15/s)
+  - MinWinChance: 0.5 (only auto-fight zones with at least this win chance)
+  - PreferredZone: 0 (0 = auto pick; 1-4 = force that zone when available and affordable)
+  - FightDelay: 3 (seconds to wait after a fight ends)
+  - StartCooldown: 5 (seconds before retrying a refused fight start)
+  - AutoJoin: true (teleport into Hatch Wars instance when outside)
+  - LowChanceFallback: true (grind best affordable zone if no zone meets MinWinChance)
+  - RespectGameAutoBattle: true (let game's AutoBattle start fights)
+  - GameAutoGraceSeconds: 20 (start our own if game auto starts nothing for 20s)
+  - ComboBar: true (show fight combo progress bar)
+  - StatusSeconds: 10 (progress print interval)
+  - TeleportToBoss: true (tp next to boss before starting)
+  - TeleportStuds: 12 (skip tp if already within this range)
+  - TeleportWait: 1.0 (seconds to settle after teleporting)
 
-> Replace `<owner>` with the GitHub account this repo is pushed under.
+## hatchwar_auto_hatch.luau
+- **What it does**: Auto-hatches one of the four Hatch Wars event eggs (Ember, Spore, Graveyard, Witching) by teleporting next to it and keeping the game's Auto Hatch chain running.
+- **CONFIG table**:
+  - Egg: "Ember Egg" (egg name or "" to stop)
+  - AutoJoin: true (teleport into Hatch Wars instance when outside)
+  - TeleportToEgg: true (tp next to the egg)
+  - TeleportStuds: 13 (skip tp if already within 13 studs)
+  - TeleportWait: 0.6 (seconds to settle after teleporting)
+  - RestartDelay: 2 (retry pause after failure)
+  - NoCoinsDelay: 10 (wait this long when broke)
+  - StatusSeconds: 10 (progress print interval)
 
-## What it does
+**Note**: Witching Egg may reply "You don't have permission to hatch this!" until you progress the event — the script stops and tells you instead of spamming retries.
 
-- **Events tab** — join Space Mining Event, auto mining (Nearest / HighestValue / Priority), ore blacklist, wide-area range, live status
-- **Extras tab** — auto teleport to best zone, auto hatch, auto claim pickaxe, auto buy next zone, auto buy from the Space Mine Merchant (respect-gated slots)
-- **Explosives tab** — per-explosive `Auto` toggle + `Cooldown` repeat-timer (activate → wait → repeat)
+## Important
+Do NOT run both scripts at the same time — they teleport your character to different spots on the same strip (bosses vs eggs) and will fight over position. Pick one.
 
-## Verified explosives (3 proofs)
-
-`__DIRECTORY.Consumables` `InventoryTags={"Space Mining"}` + the game's own `ActionMenu.Consumable` whitelist + `Tiers[1].Desc`:
-
-| Item | Merchant? | Effect |
-|---|---|---|
-| Big Bang | ✅ | mine-wide countdown → massive crater |
-| Rover Charge | ✅ | leaps & slams 3× at your feet |
-| Void Charge | ❌ drop | sucks rock in, then blows |
-| Drill Array | ✅ | 5 shafts in an X (strip mining) |
-| Core Charge | ✅ | bores 20 layers straight down |
-| Breach Charge | ✅ | small blast, cracks rock above/below |
-| Stardust Charge | ❌ drop | turns surrounding rock into solid ore |
-
-Activation = the game's own `ConsumableCmds.Consume(ownedItem, 1)` → `Consumables_Consume` with the real owned UID.
-
-## Notes
-
-- `main.lua` is the standalone (loadstring) build — includes a `STATE` shim so it runs outside Real's live-reload.
-- Cooldown is a repeat timer; no per-item cooldown exists in game data.
-- For authorized debugging of games you own/develop only.
-
-## Credits
-
-UI: [WindUI](https://github.com/Footagesus/WindUI) · Remote names verified against decompiled game sources.
+## Disclaimer
+Educational/use at your own risk; scripts only interact through the game's own client APIs and remotes. No warranties given.
