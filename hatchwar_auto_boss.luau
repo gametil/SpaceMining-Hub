@@ -1,5 +1,6 @@
 -- Hatch Wars Auto Boss Fighter (Pet Simulator 99 - "Hatch Wars" event)
--- Smart target-boss cycle: resolve ONE target boss, read ITS recommended luck/coin
+-- Smart target-boss cycle: the UI has one toggle per boss (one enabled = strict
+-- target, several = rotate among them), read the target's recommended luck/coin
 -- requirements, fight while luck >= that recommendation, drop to farming the middle
 -- Lucky Orb strip when it falls below, return to the same boss when recovered.
 -- Teleports to the boss first: the server refuses fight starts unless you stand within ~12 studs.
@@ -88,6 +89,28 @@ local LOCK_WAIT_LOGGED = false
 local luckNow
 local comboShown = false
 
+-- which bosses the UI has enabled: CONFIG.TargetBoss/PreferredZone seed it (1-4 =
+-- just that boss, 0 = auto = every boss). The UI toggles mutate this live; with
+-- 2+ enabled the cycle rotates among them, with none the fights pause.
+local bossOn = {}
+do
+	local seed = CONFIG.TargetBoss >= 1 and CONFIG.TargetBoss
+		or (CONFIG.PreferredZone >= 1 and CONFIG.PreferredZone or 0)
+	for z = 1, #HatchWar.ZONES do
+		bossOn[z] = (seed == 0 or z == seed)
+	end
+end
+
+local function enabledZones()
+	local t = {}
+	for z = 1, #HatchWar.ZONES do
+		if bossOn[z] then
+			t[#t + 1] = z
+		end
+	end
+	return t
+end
+
 local function log(msg)
 	print("[AutoBoss] " .. msg)
 end
@@ -150,7 +173,9 @@ local function pickZone()
 		return nil -- strict: a selected boss is never swapped for another one
 	end
 	local fallback, fallbackChance = nil, -1
-	for z = #HatchWar.ZONES, 1, -1 do
+	local zones = enabledZones()
+	for i = #zones, 1, -1 do -- highest enabled zone first (same preference as before)
+		local z = zones[i]
 		if zoneAvailable(z) then
 			local recCoins = Boss.Recommended(z)
 			if coins >= recCoins then
@@ -181,12 +206,13 @@ local function resolveTarget()
 		end
 		return CONFIG.PreferredZone, "config PreferredZone (locked - waiting)"
 	end
-	for z = #HatchWar.ZONES, 1, -1 do
-		if zoneAvailable(z) then
-			return z, "highest unlocked"
+	local zones = enabledZones()
+	for i = #zones, 1, -1 do
+		if zoneAvailable(zones[i]) then
+			return zones[i], "highest unlocked selected"
 		end
 	end
-	return 1, "fallback"
+	return zones[1] or 1, "fallback"
 end
 
 local function targetReqs(t)
@@ -200,10 +226,10 @@ local function targetZone()
 	end
 	local strict = CONFIG.TargetBoss >= 1 or CONFIG.PreferredZone >= 1
 	if TARGET then
-		if zoneAvailable(TARGET) or strict then
+		if strict or (bossOn[TARGET] and zoneAvailable(TARGET)) then
 			return TARGET
 		end
-		log(("target zone %d unavailable - re-evaluating"):format(TARGET))
+		log(("target zone %d unavailable or deselected - re-evaluating"):format(TARGET))
 		TARGET = nil
 		TARGET_UNREACHABLE = false
 	end
@@ -553,6 +579,15 @@ task.spawn(function()
 		TAPS_PAUSED = false
 		bailLogged = false
 
+		if #enabledZones() == 0 then
+			if CYCLE.state ~= "NO TARGET" then
+				CYCLE.state = "NO TARGET"
+				log("no bosses selected - enable at least one boss in the UI")
+			end
+			nextStartAt = os.clock() + 0.5
+			continue
+		end
+
 		if CONFIG.AutoGrindCycle then
 			local low, why = resourceLow()
 			if low then
@@ -682,7 +717,7 @@ log(("loaded: taps=%d/s minChance=%d%% autoJoin=%s tp=%s lockTarget=%s autoGrind
 	tostring(CONFIG.AutoJoin), tostring(CONFIG.TeleportToBoss), tostring(CONFIG.LockTarget),
 	tostring(CONFIG.AutoGrindCycle), CONFIG.MinLuckFactor))
 
--- === Maclib UI: pick the target boss and control every automation live ===
+-- === Maclib UI: toggle the target bosses and control every automation live ===
 -- All callbacks mutate the live CONFIG of THIS run, so changes apply mid-cycle.
 -- The window is purely a controller: if Maclib fails to load, automation keeps running.
 task.spawn(function()
@@ -691,14 +726,6 @@ task.spawn(function()
 		if not MacLib then
 			error("Maclib loadstring returned nil")
 		end
-
-		local BOSS_LIST = {
-			"Auto (highest unlocked)",
-			"1 - Ember IBZ",
-			"2 - Spore Lulu",
-			"3 - Ghoul Aussie",
-			"4 - Warlock Ahmad",
-		}
 
 		-- close a window left over from a previous run of this script
 		if G and G.AutoBossWindow then
@@ -745,18 +772,48 @@ task.spawn(function()
 			end)
 		end
 
-		Left:Header({ Text = "Target Boss" })
-		local bossDropdown = Left:Dropdown({
-			Name = "Fight which boss",
-			Multi = false,
-			Required = true,
-			Options = BOSS_LIST,
-			Default = math.clamp((CONFIG.TargetBoss or 0) + 1, 1, #BOSS_LIST),
-			Callback = function(Value)
-				local n = tonumber(tostring(Value):match("^(%d+)")) or 0
-				setTargetBoss(n)
-			end,
-		}, "BossSelect")
+		local bossToggles = {}
+		local function applyBossToggles()
+			local zones = enabledZones()
+			TARGET = nil
+			TARGET_UNREACHABLE = false
+			LOCK_WAIT_LOGGED = false
+			if #zones == 0 then
+				CONFIG.TargetBoss = 0
+				CONFIG.PreferredZone = 0
+				log("UI: no bosses selected - fights pause until you enable one")
+				pcall(function()
+					Window:Notify({ Title = "Hatch Wars Auto", Description = "No bosses selected", Lifetime = 3 })
+				end)
+			elseif #zones == 1 then
+				setTargetBoss(zones[1])
+			else
+				CONFIG.TargetBoss = 0
+				CONFIG.PreferredZone = 0
+				local names = {}
+				for _, z in ipairs(zones) do
+					names[#names + 1] = HatchWar.ZONES[z].Boss
+				end
+				local desc = "Cycling selected bosses: " .. table.concat(names, ", ")
+				log("UI: " .. desc)
+				pcall(function()
+					Window:Notify({ Title = "Hatch Wars Auto", Description = desc, Lifetime = 3 })
+				end)
+			end
+		end
+
+		Left:Header({ Text = "Bosses to fight" })
+		for z = 1, #HatchWar.ZONES do
+			local zone = z -- per-iteration copy so each toggle closes over its own zone
+			bossToggles[zone] = Left:Toggle({
+				Name = ("%d - %s"):format(zone, HatchWar.ZONES[zone].Boss),
+				Default = bossOn[zone] or false,
+				Callback = function(Value)
+					bossOn[zone] = Value and true or false
+					applyBossToggles()
+				end,
+			}, "Boss" .. zone)
+		end
 		Left:Toggle({
 			Name = "Lock target (never switch bosses)",
 			Default = CONFIG.LockTarget,
@@ -837,8 +894,10 @@ task.spawn(function()
 				rec = r
 				bossName = ("%s (zone %d)"):format(HatchWar.ZONES[t].Boss, t)
 			end
-			return ("State: %s\nBoss: %s\nLuck: %s / %s\nOrbs: %d / %d\nCoins: %s\nWins: %s\nTaps: %d | Fights started: %d"):format(
-				tostring(CYCLE.state), bossName,
+			local zones = enabledZones()
+			local sel = #zones == 0 and "none" or table.concat(zones, ",")
+			return ("State: %s\nSelected: %s\nBoss: %s\nLuck: %s / %s\nOrbs: %d / %d\nCoins: %s\nWins: %s\nTaps: %d | Fights started: %d"):format(
+				tostring(CYCLE.state), sel, bossName,
 				short(luckNow(t >= 1 and t or 1)), short(rec),
 				carriedOrbs(), orbCap(),
 				short(CurrencyCmds.Get(HatchWar.COIN) or 0),
@@ -852,14 +911,30 @@ task.spawn(function()
 		pcall(function()
 			MacLib:LoadAutoLoadConfig()
 		end)
+		-- saved configs can restore toggle values without firing their callbacks - sync
+		for z, tog in pairs(bossToggles) do
+			local okGet, state = pcall(function()
+				return tog:GetState()
+			end)
+			if okGet and type(state) == "boolean" then
+				bossOn[z] = state
+			end
+		end
+		applyBossToggles()
 		-- an explicit SELECTED_BOSS passed to the loadstring wins over the saved config
 		if G and type(G.HatchWarConfig) == "table" then
 			local n = tonumber(G.HatchWarConfig.TargetBoss)
-			if n and n >= 1 and n ~= (CONFIG.TargetBoss or 0) then
-				setTargetBoss(n)
-				pcall(function()
-					bossDropdown:UpdateSelection(math.clamp(n + 1, 1, #BOSS_LIST))
-				end)
+			if n and n >= 1 then
+				for z = 1, #HatchWar.ZONES do
+					bossOn[z] = (z == n)
+					local tog = bossToggles[z]
+					if tog then
+						pcall(function()
+							tog:UpdateState(z == n)
+						end)
+					end
+				end
+				applyBossToggles()
 			end
 		end
 
@@ -882,7 +957,7 @@ task.spawn(function()
 			log("UI closed - automation keeps running; re-execute the script to reopen the window")
 		end)
 
-		log("UI loaded - RightControl shows/hides the window (boss selector + live status)")
+		log("UI loaded - RightControl shows/hides the window (per-boss toggles + live status)")
 	end)
 	if not ok then
 		log("UI failed to load (automation keeps running): " .. tostring(err))

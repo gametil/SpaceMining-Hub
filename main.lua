@@ -1,12 +1,13 @@
--- PS99 Hatch Wars Scripts - loader / entry point
+﻿-- PS99 Hatch Wars Scripts - loader / entry point
 -- Stable URL: loadstring(game:HttpGet('https://raw.githubusercontent.com/gametil/kaila-mastan-jontro-pati/refs/heads/main/main.lua'))()
 -- Pick which script to load below, then execute this file.
 
 local TARGET = "hatch" -- "hatch" = event egg auto-hatcher | "boss" = auto boss fighter
                        -- (do not run both at once: they move the character to different spots)
 
--- Which boss to fight (only used when TARGET = "boss"):
--- 0 = auto (keeps the locked target = your highest unlocked zone, or the best fightable one)
+-- Which boss(es) to fight (only used when TARGET = "boss"; forces the UI's boss toggles on load):
+-- 0 = leave the saved toggle selection as-is (default: all bosses on, cycle picks the best)
+-- 1-4 = only that boss's toggle on (strict target)
 -- 1 = Ember IBZ     (Ember Cliffs)
 -- 2 = Spore Lulu    (Spore Forest)
 -- 3 = Ghoul Aussie  (Green Graveyard)

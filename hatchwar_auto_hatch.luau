@@ -1,7 +1,8 @@
 -- Hatch Wars Event Egg Auto-Hatcher (Pet Simulator 99 - "Hatch Wars" event)
--- Pick ONE of the four event eggs in CONFIG.Egg, or leave Egg = "" to cycle
--- automatically through every event egg. Teleports next to the egg and keeps the
--- game's own Auto Hatch chain running. Event eggs only - not the real-world eggs.
+-- Pick any set of the four event eggs (CONFIG.Egg seeds the choice; the UI gives one
+-- toggle per egg): one enabled = hatch just it, several = rotate through them, none
+-- = stop. Teleports next to the egg and keeps the game's own Auto Hatch chain
+-- running. Event eggs only - not the real-world eggs.
 --
 -- Server rules learned from testing:
 --   * Event eggs are CustomEggs: hatched through CustomEggs_Hatch(uid, amount).
@@ -40,8 +41,8 @@ local function isAlive()
 end
 
 local CONFIG = {
-	Egg = "Ember Egg",       -- "Ember Egg" | "Spore Egg" | "Graveyard Egg" | "Witching Egg" | "" or "all" = cycle every event egg | "none" = stop
-	AutoArmsPerEgg = 25,     -- auto mode: arms on one egg before rotating to the next event egg
+	Egg = "Ember Egg",       -- "Ember Egg" | "Spore Egg" | "Graveyard Egg" | "Witching Egg" | "" or "all" = every event egg | "none" = stop (seeds the UI toggles)
+	AutoArmsPerEgg = 25,     -- cycle mode: arms on one egg before rotating to the next enabled egg
 	AutoJoin = true,         -- teleport into the Hatch Wars instance when outside
 	TeleportToEgg = true,    -- tp next to the egg (server requires ~15 studs)
 	TeleportStuds = 13,      -- skip the tp if already within this range
@@ -68,10 +69,29 @@ local lastErr = ""
 local hatchBlocked = false -- permission-locked egg; cleared when the egg selection changes
 local stopHandled = false  -- stop mode: game auto hatch already disabled once
 local AUTO_EGGS = { "Ember Egg", "Spore Egg", "Graveyard Egg", "Witching Egg" }
-local autoMode = (CONFIG.Egg == "" or CONFIG.Egg == "all") -- Egg = "" -> cycle every event egg
-local autoIdx = 1
+-- per-egg on/off set, seeded from CONFIG.Egg (""/"all" = every egg on, a name = just
+-- that one on, "none"/"stop" = all off). The UI toggles mutate this live; the arm
+-- loop cycles whenever 2+ eggs are enabled and stops when none are.
+local eggOn = {}
+do
+	local seed = CONFIG.Egg
+	for _, e in ipairs(AUTO_EGGS) do
+		eggOn[e] = (seed == "" or seed == "all" or seed == e)
+	end
+end
 local autoArms = 0
 local autoBlocked = {}
+local rotateSkip = false -- true: the next candidate search starts AFTER the active egg
+
+local function enabledEggs()
+	local t = {}
+	for _, e in ipairs(AUTO_EGGS) do
+		if eggOn[e] then
+			t[#t + 1] = e
+		end
+	end
+	return t
+end
 
 local function log(msg)
 	print("[AutoHatch] " .. msg)
@@ -193,8 +213,8 @@ local function hatchOnce(uid)
 	return false, tostring(msg or "unknown error")
 end
 
--- stop mode (Egg = "none"), auto mode (Egg = "") and unknown eggs are handled live
--- in the arm loop below, so the UI can switch modes at runtime instead of exiting.
+-- stop (no eggs enabled), cycle (2+) and unknown eggs are handled live in the arm
+-- loop below, so the UI can change the selection at runtime instead of exiting.
 
 -- arm loop: keep the game's Auto Hatch chain pointed at the chosen egg
 task.spawn(function()
@@ -213,7 +233,9 @@ task.spawn(function()
 			end
 			continue
 		end
-		if not autoMode and (CONFIG.Egg == "" or CONFIG.Egg == "none" or CONFIG.Egg == "stop") then
+		local list = enabledEggs()
+		local cycleMode = #list >= 2
+		if #list == 0 then
 			if not stopHandled then
 				stopHandled = true
 				pcall(function()
@@ -222,48 +244,61 @@ task.spawn(function()
 				pcall(function()
 					HatchingCmds.ForceDisable(Hatching.Options.AUTO)
 				end)
-				log("stopped: auto hatch disabled - pick an egg (or All event eggs) in the UI to resume")
+				log("stopped: no eggs enabled - turn one on in the UI to resume")
 			end
 			continue
 		end
-		if autoMode then
-			-- pick the next event egg that is not permission-blocked
-			local found = nil
-			for i = 1, #AUTO_EGGS do
-				local idx = ((autoIdx - 1 + (i - 1)) % #AUTO_EGGS) + 1
-				local cand = AUTO_EGGS[idx]
-				if not autoBlocked[cand] then
-					found, autoIdx = cand, idx
+		-- pick the active egg: the single enabled one, or in cycle mode the next
+		-- enabled egg that is not permission-blocked, searching after the current
+		-- active egg (rotateSkip forces the search one step forward)
+		local found = list[1]
+		if cycleMode then
+			local startAt = 1
+			for i, e in ipairs(list) do
+				if e == CONFIG.Egg then
+					startAt = rotateSkip and ((i % #list) + 1) or i
 					break
 				end
 			end
-			if not found then
+			rotateSkip = false
+			local picked = nil
+			for i = 1, #list do
+				local idx = ((startAt - 1 + (i - 1)) % #list) + 1
+				if not autoBlocked[list[idx]] then
+					picked = list[idx]
+					break
+				end
+			end
+			if not picked then
 				if not stopHandled then
 					stopHandled = true
-					log("all four event eggs are locked for this account - waiting for event progress")
+					log("every enabled egg is locked for this account - waiting for event progress")
 				end
 				task.wait(5)
 				continue
 			end
+			found = picked
+		else
+			rotateSkip = false
+		end
+		if stopHandled then
 			stopHandled = false
-			if CONFIG.Egg ~= found then
-				log(CONFIG.Egg == "" and ("auto: starting with " .. found) or ("auto: switching to " .. found))
-				pcall(function()
-					HatchingCmds.StopHatching()
-				end)
-				CONFIG.Egg = found
-				autoArms = 0
-				missingSince = nil
-				lastErr = ""
-			end
-		elseif stopHandled then
-			stopHandled = false
-			log("resumed: egg = " .. CONFIG.Egg)
+			log("resumed: eggs = " .. table.concat(list, ", "))
+		end
+		if CONFIG.Egg ~= found then
+			log(CONFIG.Egg == "none" and ("starting: " .. found) or ("switching to " .. found))
+			pcall(function()
+				HatchingCmds.StopHatching()
+			end)
+			CONFIG.Egg = found
+			autoArms = 0
+			missingSince = nil
+			lastErr = ""
 		end
 		if Directory.Eggs[CONFIG.Egg] == nil then
-			if autoMode then
+			if cycleMode then
 				autoBlocked[CONFIG.Egg] = true
-				log("auto: " .. CONFIG.Egg .. " missing from Directory.Eggs - skipping")
+				log("skipping " .. CONFIG.Egg .. " - missing from Directory.Eggs")
 				task.wait(1)
 				continue
 			end
@@ -284,9 +319,9 @@ task.spawn(function()
 			if not missingSince then
 				missingSince = os.clock()
 				log(("egg '%s' not spawned yet - waiting"):format(CONFIG.Egg))
-			elseif autoMode and os.clock() - missingSince > 15 then
-				log("auto: " .. CONFIG.Egg .. " not spawned - trying the next event egg")
-				autoIdx = (autoIdx % #AUTO_EGGS) + 1
+			elseif cycleMode and os.clock() - missingSince > 15 then
+				log(CONFIG.Egg .. " not spawned - trying the next enabled egg")
+				rotateSkip = true
 				missingSince = nil
 			elseif os.clock() - missingSince > 30 then
 				missingSince = nil
@@ -318,12 +353,12 @@ task.spawn(function()
 		if ok then
 			stats.arms += 1
 			log(("hatch chain started: %s x%d (arm #%d)"):format(CONFIG.Egg, stats.batch, stats.arms))
-			if autoMode then
+			if cycleMode then
 				autoArms += 1
 				if autoArms >= CONFIG.AutoArmsPerEgg then
 					autoArms = 0
-					autoIdx = (autoIdx % #AUTO_EGGS) + 1
-					log("auto: rotating to the next event egg")
+					rotateSkip = true
+					log("auto: rotating to the next enabled egg")
 				end
 			end
 			task.wait(1.2)
@@ -333,7 +368,7 @@ task.spawn(function()
 				log("attempt failed: " .. err)
 			end
 			if err:find("permission") then
-				if autoMode then
+				if cycleMode then
 					autoBlocked[CONFIG.Egg] = true
 					log(("auto: '%s' is locked for this account - skipping it for now"):format(CONFIG.Egg))
 				else
@@ -370,23 +405,26 @@ task.spawn(function()
 end)
 
 do
-	local dir = nil
-	if not autoMode then
-		dir = Directory.Eggs[CONFIG.Egg]
-	end
-	if autoMode then
-		log(("loaded: auto mode - cycling event eggs (%s), tp=%s"):format(
-			table.concat(AUTO_EGGS, ", "), tostring(CONFIG.TeleportToEgg)))
-	elseif dir then
-		log(("loaded: egg=%s tp=%s maxHatch=%d price=%d"):format(
-			CONFIG.Egg, tostring(CONFIG.TeleportToEgg), eggMaxHatch(dir), eggPrice(dir)))
+	local list = enabledEggs()
+	if #list == 0 then
+		log(("loaded: stopped (no eggs enabled - turn one on in the UI) tp=%s"):format(
+			tostring(CONFIG.TeleportToEgg)))
+	elseif #list == 1 then
+		local dir = Directory.Eggs[list[1]]
+		if dir then
+			log(("loaded: egg=%s tp=%s maxHatch=%d price=%d"):format(
+				list[1], tostring(CONFIG.TeleportToEgg), eggMaxHatch(dir), eggPrice(dir)))
+		else
+			log(("loaded: egg=%s (unknown) tp=%s"):format(
+				list[1], tostring(CONFIG.TeleportToEgg)))
+		end
 	else
-		log(("loaded: egg=%s (stopped/unknown - pick one in the UI) tp=%s"):format(
-			tostring(CONFIG.Egg), tostring(CONFIG.TeleportToEgg)))
+		log(("loaded: %d eggs enabled (%s) - cycling, tp=%s"):format(
+			#list, table.concat(list, ", "), tostring(CONFIG.TeleportToEgg)))
 	end
 end
 
--- === Maclib UI: pick the event egg and control the hatcher live ===
+-- === Maclib UI: pick the event eggs and control the hatcher live ===
 -- All callbacks mutate the live CONFIG of THIS run, so changes apply on the next tick.
 -- The window is purely a controller: if Maclib fails to load, hatching keeps running.
 task.spawn(function()
@@ -394,19 +432,6 @@ task.spawn(function()
 		local MacLib = loadstring(game:HttpGet("https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt"))()
 		if not MacLib then
 			error("Maclib loadstring returned nil")
-		end
-
-		local EGG_LIST = { "All event eggs (auto)", "Ember Egg", "Spore Egg", "Graveyard Egg", "Witching Egg", "Stop" }
-		local function eggIndex()
-			if autoMode then
-				return 1
-			end
-			for i, e in ipairs(EGG_LIST) do
-				if e == CONFIG.Egg then
-					return i
-				end
-			end
-			return #EGG_LIST
 		end
 
 		-- close a window left over from a previous run of this script
@@ -436,63 +461,42 @@ task.spawn(function()
 		local Left = MainTab:Section({ Side = "Left" })
 		local Right = MainTab:Section({ Side = "Right" })
 
-		local function setEgg(Value)
-			if Value == "All event eggs (auto)" then
-				if autoMode then
-					return
-				end
-				autoMode = true
-				autoBlocked = {}
-				autoIdx = 1
-				autoArms = 0
-				CONFIG.Egg = ""
-				hatchBlocked = false
-				lastErr = ""
-				pcall(function()
-					HatchingCmds.StopHatching()
-				end)
-				log("UI: auto mode - cycling every event egg")
-				pcall(function()
-					Window:Notify({ Title = "Hatch Wars Auto", Description = "Auto: all event eggs", Lifetime = 3 })
-				end)
-				return
-			end
-			local egg = (Value == "Stop") and "none" or Value
-			local wasAuto = autoMode
-			if not wasAuto and egg == CONFIG.Egg then
-				return
-			end
-			autoMode = false
-			CONFIG.Egg = egg
+		local eggToggles = {}
+		local function applyEggToggles()
+			local sel = enabledEggs()
 			hatchBlocked = false
 			lastErr = ""
-			if egg == "none" then
-				log("UI: hatching stopped (game auto hatch disables on the next tick)")
+			if #sel == 0 then
+				CONFIG.Egg = "none"
+				stopHandled = false -- the arm loop runs its own stop pass and logs it
+				log("UI: every egg off - hatching will stop")
 				pcall(function()
 					Window:Notify({ Title = "Hatch Wars Auto", Description = "Hatching stopped", Lifetime = 3 })
 				end)
 			else
+				stopHandled = false
+				if CONFIG.Egg == "none" then
+					CONFIG.Egg = "" -- let the arm loop pick the first enabled egg
+				end
+				log("UI: eggs enabled: " .. table.concat(sel, ", "))
 				pcall(function()
-					HatchingCmds.StopHatching() -- drop the previous egg's chain
-				end)
-				log("UI: egg = " .. egg)
-				pcall(function()
-					Window:Notify({ Title = "Hatch Wars Auto", Description = "Egg: " .. egg, Lifetime = 3 })
+					Window:Notify({ Title = "Hatch Wars Auto", Description = "Eggs: " .. table.concat(sel, ", "), Lifetime = 3 })
 				end)
 			end
 		end
 
-		Left:Header({ Text = "Event Egg" })
-		Left:Dropdown({
-			Name = "Which egg to hatch",
-			Multi = false,
-			Required = true,
-			Options = EGG_LIST,
-			Default = eggIndex(),
-			Callback = function(Value)
-				setEgg(tostring(Value))
-			end,
-		}, "EggSelect")
+		Left:Header({ Text = "Event Eggs" })
+		for _, name in ipairs(AUTO_EGGS) do
+			local eggName = name -- per-iteration copy so each toggle closes over its own egg
+			eggToggles[eggName] = Left:Toggle({
+				Name = eggName,
+				Default = eggOn[eggName] or false,
+				Callback = function(Value)
+					eggOn[eggName] = Value and true or false
+					applyEggToggles()
+				end,
+			}, "Egg" .. (eggName:gsub(" Egg$", "")))
+		end
 
 		Left:Divider()
 		Left:Header({ Text = "Live Status" })
@@ -545,30 +549,37 @@ task.spawn(function()
 			local sv = Save.Get()
 			local hatched = (sv and sv.EggsHatched) or 0
 			local coins = CurrencyCmds.Get(HatchWar.COIN) or 0
+			local sel = enabledEggs()
 			local egg
-			if autoMode then
-				local locked = 0
-				for _ in pairs(autoBlocked) do
-					locked += 1
-				end
-				egg = "All event eggs (auto)"
-				if CONFIG.Egg ~= "" then
-					egg ..= " -> " .. CONFIG.Egg
-				end
-				if locked > 0 then
-					egg ..= (" (%d locked)"):format(locked)
-				end
-			elseif CONFIG.Egg == "" or CONFIG.Egg == "none" or CONFIG.Egg == "stop" then
-				egg = "STOPPED"
+			if #sel == 0 then
+				egg = "STOPPED (all eggs off)"
 			else
-				egg = CONFIG.Egg
+				local names = {}
+				for _, n in ipairs(sel) do
+					names[#names + 1] = (n:gsub(" Egg$", ""))
+				end
+				egg = table.concat(names, ", ")
+				if #sel >= 2 then
+					if eggOn[CONFIG.Egg] then
+						egg ..= " | active: " .. (CONFIG.Egg:gsub(" Egg$", ""))
+					end
+					local locked = 0
+					for _, n in ipairs(sel) do
+						if autoBlocked[n] then
+							locked += 1
+						end
+					end
+					if locked > 0 then
+						egg ..= (" (%d locked)"):format(locked)
+					end
+				end
 			end
 			local body = ("Egg: %s\nHatching: %s\nHatched: +%d (total %s)\nCoins: %s\nArms: %d\nLast error: %s"):format(
 				egg, tostring(HatchingCmds.IsHatching()), hatched - (startHatched or hatched),
 				short(hatched), short(coins), stats.arms,
 				lastErr ~= "" and lastErr or "-")
 			if hatchBlocked then
-				body ..= "\nBLOCKED: this egg is locked - switch eggs in the dropdown"
+				body ..= "\nBLOCKED: this egg is locked - enable another egg (or several) in the toggles"
 			end
 			return body
 		end
@@ -579,6 +590,15 @@ task.spawn(function()
 		pcall(function()
 			MacLib:LoadAutoLoadConfig()
 		end)
+		-- saved configs can restore toggle values without firing their callbacks - sync
+		for name, tog in pairs(eggToggles) do
+			local okGet, state = pcall(function()
+				return tog:GetState()
+			end)
+			if okGet and type(state) == "boolean" then
+				eggOn[name] = state
+			end
+		end
 
 		task.spawn(function()
 			while task.wait(1) do
@@ -599,7 +619,7 @@ task.spawn(function()
 			log("UI closed - hatching keeps running; re-execute the script to reopen the window")
 		end)
 
-		log("UI loaded - RightControl shows/hides the window (egg selector + live status)")
+		log("UI loaded - RightControl shows/hides the window (per-egg toggles + live status)")
 	end)
 	if not ok then
 		log("UI failed to load (hatching keeps running): " .. tostring(err))
