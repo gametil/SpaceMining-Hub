@@ -1,0 +1,13 @@
+# No extra files, no binaries
+*.log
+*.tmp
+*.bak
+*.exe
+*.dll
+*.zip
+*.rar
+.DS_Store
+Thumbs.db
+__pycache__/
+.vscode/
+.idea/
