@@ -82,6 +82,7 @@ local CYCLE = { state = "IDLE", lastLuck = 0, lastCoins = 0, lastOrbs = 0 }
 local TARGET = nil
 local TARGET_UNREACHABLE = false
 local TAPS_PAUSED = false
+local LOCK_WAIT_LOGGED = false
 local luckNow
 local comboShown = false
 
@@ -137,12 +138,14 @@ local function pickZone()
 		if zoneAvailable(z) and coins >= (Boss.Recommended(z) or 0) then
 			return z
 		end
+		return nil -- strict: a selected boss is never swapped for another one
 	end
 	if CONFIG.PreferredZone >= 1 then
 		local z = CONFIG.PreferredZone
 		if zoneAvailable(z) and coins >= (Boss.Recommended(z) or 0) then
 			return z
 		end
+		return nil -- strict: a selected boss is never swapped for another one
 	end
 	local fallback, fallbackChance = nil, -1
 	for z = #HatchWar.ZONES, 1, -1 do
@@ -164,11 +167,17 @@ end
 
 -- === target boss: resolve once, keep it unless unavailable or config selects another ===
 local function resolveTarget()
-	if CONFIG.TargetBoss >= 1 and zoneAvailable(CONFIG.TargetBoss) then
-		return CONFIG.TargetBoss, "config TargetBoss"
+	if CONFIG.TargetBoss >= 1 then
+		if zoneAvailable(CONFIG.TargetBoss) then
+			return CONFIG.TargetBoss, "config TargetBoss"
+		end
+		return CONFIG.TargetBoss, "config TargetBoss (locked - waiting)"
 	end
-	if CONFIG.PreferredZone >= 1 and zoneAvailable(CONFIG.PreferredZone) then
-		return CONFIG.PreferredZone, "config PreferredZone"
+	if CONFIG.PreferredZone >= 1 then
+		if zoneAvailable(CONFIG.PreferredZone) then
+			return CONFIG.PreferredZone, "config PreferredZone"
+		end
+		return CONFIG.PreferredZone, "config PreferredZone (locked - waiting)"
 	end
 	for z = #HatchWar.ZONES, 1, -1 do
 		if zoneAvailable(z) then
@@ -187,8 +196,9 @@ local function targetZone()
 	if not CONFIG.LockTarget then
 		return pickZone() or (select(1, resolveTarget()))
 	end
+	local strict = CONFIG.TargetBoss >= 1 or CONFIG.PreferredZone >= 1
 	if TARGET then
-		if zoneAvailable(TARGET) then
+		if zoneAvailable(TARGET) or strict then
 			return TARGET
 		end
 		log(("target zone %d unavailable - re-evaluating"):format(TARGET))
@@ -554,7 +564,10 @@ task.spawn(function()
 					local _, rec = targetReqs(t)
 					if luckNow(t) < rec * CONFIG.MinLuckFactor then
 						TARGET_UNREACHABLE = true
-						log(("target %d luck unreachable at orb cap - falling back to best fightable zone"):format(t))
+						log(("target %d luck unreachable at orb cap - %s"):format(t,
+							(CONFIG.TargetBoss >= 1 or CONFIG.PreferredZone >= 1)
+								and "staying on this boss with the luck gate lifted"
+								or "falling back to best fightable zone"))
 					end
 				end
 				grindStep()
@@ -596,6 +609,15 @@ task.spawn(function()
 			nextStartAt = os.clock() + 6
 			continue
 		end
+		if not zoneAvailable(z) then
+			if not LOCK_WAIT_LOGGED then
+				LOCK_WAIT_LOGGED = true
+				log(("waiting: selected boss zone %d is locked - standing by until it unlocks"):format(z))
+			end
+			nextStartAt = os.clock() + 5
+			continue
+		end
+		LOCK_WAIT_LOGGED = false
 		local started, errText
 		if CONFIG.TeleportToBoss then
 			local tpOk, tpWhy = goToBoss(z)
