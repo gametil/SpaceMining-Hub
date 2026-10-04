@@ -47,6 +47,8 @@ local CONFIG = {
 	LockTarget = true,           -- keep the same target boss unless it becomes unavailable
 	MinLuckFactor = 1.0,         -- fight while luck >= factor * the TARGET boss's recommended luck
 	AutoGrindCycle = true,       -- full cycle: fight -> luck low -> farm middle orbs -> fight again
+	AutoFight = true,            -- start new fights automatically (off = pause after the current one)
+	TapsEnabled = true,          -- tap fight circles automatically during fights
 	BailTapsOnLowLuck = false,   -- false: keep tapping for the whole fight; luck can dip below rec mid-fight (hatching uses orbs), farming still runs right after the fight ends
 	GrindMonitorSeconds = 2,     -- sample Luck/meter cadence during a fight
 	GrindLogSeconds = 6,         -- progress print interval while farming
@@ -487,7 +489,7 @@ end
 task.spawn(function()
 	while isAlive() do
 		task.wait(0.05)
-		if Boss.IsFighting() and not TAPS_PAUSED and Circles.Count() > 0 then
+		if Boss.IsFighting() and CONFIG.TapsEnabled and not TAPS_PAUSED and Circles.Count() > 0 then
 			local ok = pcall(function()
 				return Circles.TapOldest(tapCircle)
 			end)
@@ -585,6 +587,11 @@ task.spawn(function()
 			end
 		end
 
+		if not CONFIG.AutoFight then
+			CYCLE.state = "PAUSED"
+			nextStartAt = os.clock() + 0.5
+			continue
+		end
 		local idle = os.clock() - notFightingSince
 		if idle < CONFIG.FightDelay or os.clock() < nextStartAt then
 			continue
@@ -674,3 +681,210 @@ log(("loaded: taps=%d/s minChance=%d%% autoJoin=%s tp=%s lockTarget=%s autoGrind
 	CONFIG.TapsPerSecond, math.floor(CONFIG.MinWinChance * 100),
 	tostring(CONFIG.AutoJoin), tostring(CONFIG.TeleportToBoss), tostring(CONFIG.LockTarget),
 	tostring(CONFIG.AutoGrindCycle), CONFIG.MinLuckFactor))
+
+-- === Maclib UI: pick the target boss and control every automation live ===
+-- All callbacks mutate the live CONFIG of THIS run, so changes apply mid-cycle.
+-- The window is purely a controller: if Maclib fails to load, automation keeps running.
+task.spawn(function()
+	local ok, err = pcall(function()
+		local MacLib = loadstring(game:HttpGet("https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt"))()
+		if not MacLib then
+			error("Maclib loadstring returned nil")
+		end
+
+		local BOSS_LIST = {
+			"Auto (highest unlocked)",
+			"1 - Ember IBZ",
+			"2 - Spore Lulu",
+			"3 - Ghoul Aussie",
+			"4 - Warlock Ahmad",
+		}
+
+		-- close a window left over from a previous run of this script
+		if G and G.AutoBossWindow then
+			pcall(function()
+				G.AutoBossWindow:Unload()
+			end)
+		end
+
+		local Window = MacLib:Window({
+			Title = "Hatch Wars Auto",
+			Subtitle = "Boss Fighter",
+			Size = UDim2.fromOffset(740, 560),
+			DragStyle = 1,
+			DisabledWindowControls = {},
+			ShowUserInfo = true,
+			Keybind = Enum.KeyCode.RightControl,
+			AcrylicBlur = false, -- off: acrylic blur can be detected
+		})
+		if G then
+			G.AutoBossWindow = Window
+		end
+
+		local TabGroup = Window:TabGroup()
+		local MainTab = TabGroup:Tab({ Name = "Boss" })
+		local SettingsTab = TabGroup:Tab({ Name = "Settings" })
+		local Left = MainTab:Section({ Side = "Left" })
+		local Right = MainTab:Section({ Side = "Right" })
+
+		local function setTargetBoss(n)
+			CONFIG.TargetBoss = n
+			CONFIG.PreferredZone = n
+			TARGET = nil
+			TARGET_UNREACHABLE = false
+			LOCK_WAIT_LOGGED = false
+			local desc
+			if n >= 1 then
+				desc = ("Target locked to boss %d (%s)"):format(n, HatchWar.ZONES[n].Boss)
+			else
+				desc = "Target set to auto (highest unlocked, best fightable)"
+			end
+			log("UI: " .. desc)
+			pcall(function()
+				Window:Notify({ Title = "Hatch Wars Auto", Description = desc, Lifetime = 3 })
+			end)
+		end
+
+		Left:Header({ Text = "Target Boss" })
+		local bossDropdown = Left:Dropdown({
+			Name = "Fight which boss",
+			Multi = false,
+			Required = true,
+			Options = BOSS_LIST,
+			Default = math.clamp((CONFIG.TargetBoss or 0) + 1, 1, #BOSS_LIST),
+			Callback = function(Value)
+				local n = tonumber(tostring(Value):match("^(%d+)")) or 0
+				setTargetBoss(n)
+			end,
+		}, "BossSelect")
+		Left:Toggle({
+			Name = "Lock target (never switch bosses)",
+			Default = CONFIG.LockTarget,
+			Callback = function(Value)
+				CONFIG.LockTarget = Value
+			end,
+		}, "LockTarget")
+
+		Left:Divider()
+		Left:Header({ Text = "Live Status" })
+		local statusPara = Left:Paragraph({
+			Header = "Status",
+			Body = "starting...",
+		})
+
+		Right:Header({ Text = "Automation" })
+		Right:Toggle({
+			Name = "Auto fight (start fights)",
+			Default = CONFIG.AutoFight,
+			Callback = function(Value)
+				CONFIG.AutoFight = Value
+				log("UI: auto fight " .. (Value and "ON" or "OFF"))
+			end,
+		}, "AutoFight")
+		Right:Toggle({
+			Name = "Auto farm (when luck is low)",
+			Default = CONFIG.AutoGrindCycle,
+			Callback = function(Value)
+				CONFIG.AutoGrindCycle = Value
+				log("UI: auto farm " .. (Value and "ON" or "OFF"))
+			end,
+		}, "AutoFarm")
+		Right:Toggle({
+			Name = "Auto tap fight circles",
+			Default = CONFIG.TapsEnabled,
+			Callback = function(Value)
+				CONFIG.TapsEnabled = Value
+				log("UI: auto taps " .. (Value and "ON" or "OFF"))
+			end,
+		}, "AutoTaps")
+		Right:Toggle({
+			Name = "Teleport to boss before fight",
+			Default = CONFIG.TeleportToBoss,
+			Callback = function(Value)
+				CONFIG.TeleportToBoss = Value
+				log("UI: boss teleport " .. (Value and "ON" or "OFF"))
+			end,
+		}, "TeleportBoss")
+		Right:Slider({
+			Name = "Taps per second",
+			Default = CONFIG.TapsPerSecond,
+			Minimum = 1,
+			Maximum = 15,
+			DisplayMethod = "Value",
+			Precision = 0,
+			Callback = function(Value)
+				CONFIG.TapsPerSecond = math.floor(Value)
+			end,
+		}, "TapsPerSecond")
+		Right:Slider({
+			Name = "Luck gate (x recommendation)",
+			Default = CONFIG.MinLuckFactor,
+			Minimum = 0.5,
+			Maximum = 1.5,
+			DisplayMethod = "Value",
+			Precision = 2,
+			Callback = function(Value)
+				CONFIG.MinLuckFactor = Value
+			end,
+		}, "MinLuckFactor")
+
+		local function statusBody()
+			local t = TARGET or 0
+			local rec = 0
+			local bossName = "- (auto)"
+			if t >= 1 then
+				local _, r = targetReqs(t)
+				rec = r
+				bossName = ("%s (zone %d)"):format(HatchWar.ZONES[t].Boss, t)
+			end
+			return ("State: %s\nBoss: %s\nLuck: %s / %s\nOrbs: %d / %d\nCoins: %s\nWins: %s\nTaps: %d | Fights started: %d"):format(
+				tostring(CYCLE.state), bossName,
+				short(luckNow(t >= 1 and t or 1)), short(rec),
+				carriedOrbs(), orbCap(),
+				short(CurrencyCmds.Get(HatchWar.COIN) or 0),
+				table.concat(bossWins(), ","),
+				stats.taps, stats.starts)
+		end
+
+		MacLib:SetFolder("HatchWarsAuto")
+		SettingsTab:InsertConfigSection("Left")
+		MainTab:Select()
+		pcall(function()
+			MacLib:LoadAutoLoadConfig()
+		end)
+		-- an explicit SELECTED_BOSS passed to the loadstring wins over the saved config
+		if G and type(G.HatchWarConfig) == "table" then
+			local n = tonumber(G.HatchWarConfig.TargetBoss)
+			if n and n >= 1 and n ~= (CONFIG.TargetBoss or 0) then
+				setTargetBoss(n)
+				pcall(function()
+					bossDropdown:UpdateSelection(math.clamp(n + 1, 1, #BOSS_LIST))
+				end)
+			end
+		end
+
+		task.spawn(function()
+			while task.wait(1) do
+				if not isAlive() then
+					break
+				end
+				local bodyOk, body = pcall(statusBody)
+				if bodyOk and statusPara then
+					pcall(function()
+						statusPara:UpdateBody(body)
+					end)
+				end
+			end
+		end)
+
+		Window.onUnloaded(function()
+			statusPara = nil
+			log("UI closed - automation keeps running; re-execute the script to reopen the window")
+		end)
+
+		log("UI loaded - RightControl shows/hides the window (boss selector + live status)")
+	end)
+	if not ok then
+		log("UI failed to load (automation keeps running): " .. tostring(err))
+	end
+end)
