@@ -1,5 +1,6 @@
 -- Hatch Wars Event Egg Auto-Hatcher (Pet Simulator 99 - "Hatch Wars" event)
--- Pick ONE of the four event eggs in CONFIG.Egg, teleports next to it and keeps the
+-- Pick ONE of the four event eggs in CONFIG.Egg, or leave Egg = "" to cycle
+-- automatically through every event egg. Teleports next to the egg and keeps the
 -- game's own Auto Hatch chain running. Event eggs only - not the real-world eggs.
 --
 -- Server rules learned from testing:
@@ -39,7 +40,8 @@ local function isAlive()
 end
 
 local CONFIG = {
-	Egg = "Ember Egg",       -- "Ember Egg" | "Spore Egg" | "Graveyard Egg" | "Witching Egg" | "" = stop & disable auto hatch
+	Egg = "Ember Egg",       -- "Ember Egg" | "Spore Egg" | "Graveyard Egg" | "Witching Egg" | "" or "all" = cycle every event egg | "none" = stop
+	AutoArmsPerEgg = 25,     -- auto mode: arms on one egg before rotating to the next event egg
 	AutoJoin = true,         -- teleport into the Hatch Wars instance when outside
 	TeleportToEgg = true,    -- tp next to the egg (server requires ~15 studs)
 	TeleportStuds = 13,      -- skip the tp if already within this range
@@ -64,7 +66,12 @@ local stats = { arms = 0, batch = 0 }
 local startHatched = nil
 local lastErr = ""
 local hatchBlocked = false -- permission-locked egg; cleared when the egg selection changes
-local stopHandled = false  -- "" stop mode: game auto hatch already disabled once
+local stopHandled = false  -- stop mode: game auto hatch already disabled once
+local AUTO_EGGS = { "Ember Egg", "Spore Egg", "Graveyard Egg", "Witching Egg" }
+local autoMode = (CONFIG.Egg == "" or CONFIG.Egg == "all") -- Egg = "" -> cycle every event egg
+local autoIdx = 1
+local autoArms = 0
+local autoBlocked = {}
 
 local function log(msg)
 	print("[AutoHatch] " .. msg)
@@ -186,8 +193,8 @@ local function hatchOnce(uid)
 	return false, tostring(msg or "unknown error")
 end
 
--- stop mode (CONFIG.Egg = "") and unknown eggs are handled live in the arm loop
--- below, so the UI can switch eggs at runtime instead of the script exiting.
+-- stop mode (Egg = "none"), auto mode (Egg = "") and unknown eggs are handled live
+-- in the arm loop below, so the UI can switch modes at runtime instead of exiting.
 
 -- arm loop: keep the game's Auto Hatch chain pointed at the chosen egg
 task.spawn(function()
@@ -206,7 +213,7 @@ task.spawn(function()
 			end
 			continue
 		end
-		if CONFIG.Egg == "" or CONFIG.Egg == "none" then
+		if not autoMode and (CONFIG.Egg == "" or CONFIG.Egg == "none" or CONFIG.Egg == "stop") then
 			if not stopHandled then
 				stopHandled = true
 				pcall(function()
@@ -215,15 +222,51 @@ task.spawn(function()
 				pcall(function()
 					HatchingCmds.ForceDisable(Hatching.Options.AUTO)
 				end)
-				log("stopped: auto hatch disabled - pick an egg in the UI to resume")
+				log("stopped: auto hatch disabled - pick an egg (or All event eggs) in the UI to resume")
 			end
 			continue
 		end
-		if stopHandled then
+		if autoMode then
+			-- pick the next event egg that is not permission-blocked
+			local found = nil
+			for i = 1, #AUTO_EGGS do
+				local idx = ((autoIdx - 1 + (i - 1)) % #AUTO_EGGS) + 1
+				local cand = AUTO_EGGS[idx]
+				if not autoBlocked[cand] then
+					found, autoIdx = cand, idx
+					break
+				end
+			end
+			if not found then
+				if not stopHandled then
+					stopHandled = true
+					log("all four event eggs are locked for this account - waiting for event progress")
+				end
+				task.wait(5)
+				continue
+			end
+			stopHandled = false
+			if CONFIG.Egg ~= found then
+				log(CONFIG.Egg == "" and ("auto: starting with " .. found) or ("auto: switching to " .. found))
+				pcall(function()
+					HatchingCmds.StopHatching()
+				end)
+				CONFIG.Egg = found
+				autoArms = 0
+				missingSince = nil
+				lastErr = ""
+			end
+		elseif stopHandled then
 			stopHandled = false
 			log("resumed: egg = " .. CONFIG.Egg)
 		end
 		if Directory.Eggs[CONFIG.Egg] == nil then
+			if autoMode then
+				autoBlocked[CONFIG.Egg] = true
+				log("auto: " .. CONFIG.Egg .. " missing from Directory.Eggs - skipping")
+				task.wait(1)
+				continue
+			end
 			if unknownLogged ~= CONFIG.Egg then
 				unknownLogged = CONFIG.Egg
 				log(("unknown egg '%s' - use: Ember Egg, Spore Egg, Graveyard Egg, Witching Egg"):format(tostring(CONFIG.Egg)))
@@ -241,6 +284,10 @@ task.spawn(function()
 			if not missingSince then
 				missingSince = os.clock()
 				log(("egg '%s' not spawned yet - waiting"):format(CONFIG.Egg))
+			elseif autoMode and os.clock() - missingSince > 15 then
+				log("auto: " .. CONFIG.Egg .. " not spawned - trying the next event egg")
+				autoIdx = (autoIdx % #AUTO_EGGS) + 1
+				missingSince = nil
 			elseif os.clock() - missingSince > 30 then
 				missingSince = nil
 				log(("egg '%s' still missing - is it unlocked in this zone?"):format(CONFIG.Egg))
@@ -271,6 +318,14 @@ task.spawn(function()
 		if ok then
 			stats.arms += 1
 			log(("hatch chain started: %s x%d (arm #%d)"):format(CONFIG.Egg, stats.batch, stats.arms))
+			if autoMode then
+				autoArms += 1
+				if autoArms >= CONFIG.AutoArmsPerEgg then
+					autoArms = 0
+					autoIdx = (autoIdx % #AUTO_EGGS) + 1
+					log("auto: rotating to the next event egg")
+				end
+			end
 			task.wait(1.2)
 		else
 			if err ~= lastErr then
@@ -278,8 +333,13 @@ task.spawn(function()
 				log("attempt failed: " .. err)
 			end
 			if err:find("permission") then
-				log(("BLOCKED: '%s' is locked for this account - beat more bosses / progress the event, or switch eggs in the UI"):format(CONFIG.Egg))
-				hatchBlocked = true
+				if autoMode then
+					autoBlocked[CONFIG.Egg] = true
+					log(("auto: '%s' is locked for this account - skipping it for now"):format(CONFIG.Egg))
+				else
+					log(("BLOCKED: '%s' is locked for this account - beat more bosses / progress the event, or switch eggs in the UI"):format(CONFIG.Egg))
+					hatchBlocked = true
+				end
 			elseif err:find("too far") then
 				nextArmAt = os.clock() + 1
 			elseif err:find("too quickly") then
@@ -310,8 +370,14 @@ task.spawn(function()
 end)
 
 do
-	local dir = Directory.Eggs[CONFIG.Egg]
-	if dir then
+	local dir = nil
+	if not autoMode then
+		dir = Directory.Eggs[CONFIG.Egg]
+	end
+	if autoMode then
+		log(("loaded: auto mode - cycling event eggs (%s), tp=%s"):format(
+			table.concat(AUTO_EGGS, ", "), tostring(CONFIG.TeleportToEgg)))
+	elseif dir then
 		log(("loaded: egg=%s tp=%s maxHatch=%d price=%d"):format(
 			CONFIG.Egg, tostring(CONFIG.TeleportToEgg), eggMaxHatch(dir), eggPrice(dir)))
 	else
@@ -330,10 +396,13 @@ task.spawn(function()
 			error("Maclib loadstring returned nil")
 		end
 
-		local EGG_LIST = { "Ember Egg", "Spore Egg", "Graveyard Egg", "Witching Egg", "Stop" }
-		local function eggIndex(name)
+		local EGG_LIST = { "All event eggs (auto)", "Ember Egg", "Spore Egg", "Graveyard Egg", "Witching Egg", "Stop" }
+		local function eggIndex()
+			if autoMode then
+				return 1
+			end
 			for i, e in ipairs(EGG_LIST) do
-				if e == name then
+				if e == CONFIG.Egg then
 					return i
 				end
 			end
@@ -368,14 +437,36 @@ task.spawn(function()
 		local Right = MainTab:Section({ Side = "Right" })
 
 		local function setEgg(Value)
-			local egg = (Value == "Stop") and "" or Value
-			if egg == CONFIG.Egg then
+			if Value == "All event eggs (auto)" then
+				if autoMode then
+					return
+				end
+				autoMode = true
+				autoBlocked = {}
+				autoIdx = 1
+				autoArms = 0
+				CONFIG.Egg = ""
+				hatchBlocked = false
+				lastErr = ""
+				pcall(function()
+					HatchingCmds.StopHatching()
+				end)
+				log("UI: auto mode - cycling every event egg")
+				pcall(function()
+					Window:Notify({ Title = "Hatch Wars Auto", Description = "Auto: all event eggs", Lifetime = 3 })
+				end)
 				return
 			end
+			local egg = (Value == "Stop") and "none" or Value
+			local wasAuto = autoMode
+			if not wasAuto and egg == CONFIG.Egg then
+				return
+			end
+			autoMode = false
 			CONFIG.Egg = egg
 			hatchBlocked = false
 			lastErr = ""
-			if egg == "" or egg == "none" then
+			if egg == "none" then
 				log("UI: hatching stopped (game auto hatch disables on the next tick)")
 				pcall(function()
 					Window:Notify({ Title = "Hatch Wars Auto", Description = "Hatching stopped", Lifetime = 3 })
@@ -397,7 +488,7 @@ task.spawn(function()
 			Multi = false,
 			Required = true,
 			Options = EGG_LIST,
-			Default = eggIndex(CONFIG.Egg),
+			Default = eggIndex(),
 			Callback = function(Value)
 				setEgg(tostring(Value))
 			end,
@@ -454,7 +545,24 @@ task.spawn(function()
 			local sv = Save.Get()
 			local hatched = (sv and sv.EggsHatched) or 0
 			local coins = CurrencyCmds.Get(HatchWar.COIN) or 0
-			local egg = (CONFIG.Egg == "" or CONFIG.Egg == "none") and "STOPPED" or CONFIG.Egg
+			local egg
+			if autoMode then
+				local locked = 0
+				for _ in pairs(autoBlocked) do
+					locked += 1
+				end
+				egg = "All event eggs (auto)"
+				if CONFIG.Egg ~= "" then
+					egg ..= " -> " .. CONFIG.Egg
+				end
+				if locked > 0 then
+					egg ..= (" (%d locked)"):format(locked)
+				end
+			elseif CONFIG.Egg == "" or CONFIG.Egg == "none" or CONFIG.Egg == "stop" then
+				egg = "STOPPED"
+			else
+				egg = CONFIG.Egg
+			end
 			local body = ("Egg: %s\nHatching: %s\nHatched: +%d (total %s)\nCoins: %s\nArms: %d\nLast error: %s"):format(
 				egg, tostring(HatchingCmds.IsHatching()), hatched - (startHatched or hatched),
 				short(hatched), short(coins), stats.arms,

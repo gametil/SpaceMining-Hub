@@ -40,11 +40,11 @@ Edit the top of `main.lua` before running:
 
 ## hatchwar_auto_hatch.luau
 
-- **What it does**: auto-hatches one of the four Hatch Wars event eggs (Ember, Spore, Graveyard, Witching) by teleporting next to it (server needs ~15 studs) and keeping the game's Auto Hatch chain running.
-- **In-game UI (Maclib window)**: press `RightControl` to show/hide. Egg dropdown switches between Ember / Spore / Graveyard / Witching / Stop at runtime (switching stops the old egg's chain; Stop disables the game's auto hatch and resumes when you pick an egg again). Toggles for auto join and egg teleport, sliders for retry delays, and a live status panel (egg, hatching, hatched count, coins, arms, last error). A permission-locked egg no longer kills the script - it blocks and the status shows it until you switch eggs. Settings auto-save; if Maclib fails to load, hatching keeps running headless.
-- **CONFIG**: Egg ("Ember Egg" / "" to stop), AutoJoin, TeleportToEgg, TeleportStuds, TeleportWait, RestartDelay, NoCoinsDelay, StatusSeconds.
+- **What it does**: auto-hatches the four Hatch Wars event eggs (Ember, Spore, Graveyard, Witching) by teleporting next to them (server needs ~15 studs) and keeping the game's Auto Hatch chain running - pick one egg, or cycle all four automatically.
+- **In-game UI (Maclib window)**: press `RightControl` to show/hide. Egg dropdown switches between "All event eggs (auto)" / Ember / Spore / Graveyard / Witching / Stop at runtime (auto mode rotates through every event egg, switching stops the old egg's chain; Stop disables the game's auto hatch and resumes when you pick an egg again). Toggles for auto join and egg teleport, sliders for retry delays, and a live status panel (egg, hatching, hatched count, coins, arms, last error). A permission-locked egg no longer kills the script - it blocks and the status shows it until you switch eggs (auto mode just skips it). Settings auto-save; if Maclib fails to load, hatching keeps running headless.
+- **CONFIG**: Egg ("Ember Egg" / "" or "all" = cycle every event egg / "none" = stop), AutoArmsPerEgg (rotates after N arms in auto mode), AutoJoin, TeleportToEgg, TeleportStuds, TeleportWait, RestartDelay, NoCoinsDelay, StatusSeconds.
 
-**Note**: the Witching Egg may reply "You don't have permission to hatch this!" until you progress the event - the script stops and tells you instead of spamming retries.
+**Note**: the Witching Egg may reply "You don't have permission to hatch this!" until you progress the event - single-egg mode stops and tells you, auto mode skips it and moves to the next event egg instead of spamming retries.
 
 ## Important
 
