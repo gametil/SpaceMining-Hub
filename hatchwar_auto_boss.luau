@@ -43,6 +43,7 @@ local CONFIG = {
 	TeleportToBoss = true,       -- tp next to the picked boss before starting (server refuses from far away)
 	TeleportStuds = 12,          -- skip the tp if already within this range of the boss
 	TeleportWait = 1.0,          -- seconds to settle after teleporting before starting the fight
+	AutoGrindCycle = true,        -- if Luck/coins low, auto-return to grinding and loop back to boss
 }
 
 local HatchWarCmds = require(Library.Client.HatchWarCmds)
@@ -56,6 +57,7 @@ local Save = require(Library.Client.Save)
 local InstancingCmds = require(Library.Client.InstancingCmds)
 
 local stats = { taps = 0, starts = 0, zone = 0 }
+local CYCLE = { state = "IDLE", lastLuck = 0, lastCoins = 0 }
 local comboShown = false
 
 local function log(msg)
@@ -139,6 +141,47 @@ end
 local function charHRP()
 	local char = LocalPlayer.Character
 	return char and char:FindFirstChild("HumanoidRootPart")
+-- Boss Fight / Grinding System: Monitor Luck and meter, auto-return to grinding when low
+local GRIND = {
+	MinCoins = 500,         -- minimum coins required to enter boss fight
+	MinLuck = 10,           -- absolute minimum Luck below which we must grind
+	MaxLuckDrop = 0.8,      -- when Luck falls below 80% of the luck we had at load time, stop fighting
+	GrindAreaPosition = nil -- position of middle grinding area (recorded on first teleport-to-grind)
+}
+
+local function getLuckStat()
+	local ok, v = pcall(function()
+		local EggCmds = require(game.ReplicatedStorage.Library.Client.EggCmds)
+		return EggCmds.ComputeLuckBoost(nil, nil)
+	end)
+	if ok and type(v) == "number" then return v end
+	-- fallback: read from Save / instance variables for TapHeroes Luck
+	local sv = Save.Get()
+	local luck = sv and sv.TapHeroes and sv.TapHeroes.Luck
+	return (type(luck) == "number") and luck or 50
+end
+
+local function inGrindingArea()
+	local hrp = charHRP()
+	if not hrp then return false end
+	if not GRIND.GrindAreaPosition then
+		-- record current position as "middle grinding area" on first check
+		GRIND.GrindAreaPosition = hrp.Position
+	end
+	-- within 30 studs of recorded grind position = considered "grinding"
+	return (hrp.Position - GRIND.GrindAreaPosition).Magnitude < 30
+end
+
+local function goToGrindingArea()
+	if not GRIND.GrindAreaPosition then return false, "no grind position set" end
+	local hrp = charHRP()
+	if not hrp then return false, "no character" end
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.CFrame = CFrame.new(GRIND.GrindAreaPosition + Vector3.new(0, 3, 5))
+	return true, "returned to middle grinding area"
+end
+
+
 end
 
 local function bossPosition(z)
@@ -233,6 +276,7 @@ task.spawn(function()
 	local notFightingSince = os.clock()
 	local nextStartAt = 0
 	local lastGameAutoAt = os.clock()
+	local luckBaseline = 0
 	while isAlive() do
 		task.wait(0.4)
 		if not inEvent() then
@@ -259,6 +303,24 @@ task.spawn(function()
 			and gameAutoBattleOn()
 			and (os.clock() - lastGameAutoAt) < CONFIG.GameAutoGraceSeconds
 		if letGameStart then
+			continue
+		end
+		-- Monitor Luck and meter: if too low or out of coins, stop and return to grinding
+		if luckBaseline == 0 then
+			luckBaseline = getLuckStat()
+		end
+		local luck = getLuckStat()
+		local coins = CurrencyCmds.Get(HatchWar.COIN) or 0
+		local tooLowLuck = (luck <= GRIND.MinLuck) or (luck < luckBaseline * GRIND.MaxLuckDrop)
+		if tooLowLuck or (coins < GRIND.MinCoins) then
+			if not inGrindingArea() then
+				local ok, msg = goToGrindingArea()
+				log(("grinding: luck=%d coins=%s -> %s"):format(math.floor(luck), short(coins), msg))
+			else
+				log(("grinding: luck=%d coins=%s (low) - waiting to replenish"):format(math.floor(luck), short(coins)))
+			end
+			-- Wait until replenished (monitor loop continues automatically via the main loop)
+			nextStartAt = os.clock() + 4
 			continue
 		end
 		local z = pickZone()
@@ -298,12 +360,16 @@ task.spawn(function()
 		task.wait(CONFIG.StatusSeconds)
 		local z = stats.zone
 		local chance = z > 0 and math.floor((Boss.WinChance(z) or 0) * 100) or 0
-		log(("fighting=%s zone=%d chance=%d%% coins=%s wins=%s taps=%d starts=%d"):format(
-			tostring(Boss.IsFighting()), z, chance, short(CurrencyCmds.Get(HatchWar.COIN) or 0),
-			table.concat(bossWins(), ","), stats.taps, stats.starts))
+		local luck = getLuckStat()
+	CYCLE.lastLuck = luck
+	CYCLE.lastCoins = CurrencyCmds.Get(HatchWar.COIN) or 0
+	CYCLE.state = Boss.IsFighting() and "FIGHTING" or (inGrindingArea() and "GRINDING" or "REPLENISHING")
+	log(("cycle=%s fighting=%s zone=%d chance=%d%% coins=%s luck=%d wins=%s taps=%d starts=%d"):format(
+			CYCLE.state, tostring(Boss.IsFighting()), z, chance, short(CurrencyCmds.Get(HatchWar.COIN) or 0),
+			math.floor(luck), table.concat(bossWins(), ","), stats.taps, stats.starts))
 	end
 end)
 
-log(("loaded: taps=%d/s minChance=%d%% autoJoin=%s tp=%s"):format(
+log(("loaded: taps=%d/s minChance=%d%% autoJoin=%s tp=%s autoGrind=%s"):format(
 	CONFIG.TapsPerSecond, math.floor(CONFIG.MinWinChance * 100),
-	tostring(CONFIG.AutoJoin), tostring(CONFIG.TeleportToBoss)))
+	tostring(CONFIG.AutoJoin), tostring(CONFIG.TeleportToBoss), tostring(CONFIG.AutoGrindCycle)))
