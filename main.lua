@@ -1,11 +1,19 @@
 -- PS99 Hatch Wars Scripts - loader / entry point
--- Stable URL: loadstring(game:HttpGet('https://raw.githubusercontent.com/gametil/SpaceMining-Hub/refs/heads/main/main.lua'))()
+-- Stable URL: loadstring(game:HttpGet('https://raw.githubusercontent.com/gametil/kaila-mastan-jontro-pati/refs/heads/main/main.lua'))()
 -- Pick which script to load below, then execute this file.
 
 local TARGET = "hatch" -- "hatch" = event egg auto-hatcher | "boss" = auto boss fighter
-                       -- (do not run both at once: they teleport the character to different spots)
+                       -- (do not run both at once: they move the character to different spots)
 
-local BASE = "https://raw.githubusercontent.com/gametil/SpaceMining-Hub/refs/heads/main/"
+-- Which boss to fight (only used when TARGET = "boss"):
+-- 0 = auto (keeps the locked target = your highest unlocked zone, or the best fightable one)
+-- 1 = Ember IBZ     (Ember Cliffs)
+-- 2 = Spore Lulu    (Spore Forest)
+-- 3 = Ghoul Aussie  (Green Graveyard)
+-- 4 = Warlock Ahmad (Witching Hour)
+local SELECTED_BOSS = 0
+
+local BASE = "https://raw.githubusercontent.com/gametil/kaila-mastan-jontro-pati/refs/heads/main/"
 local FILES = {
 	hatch = "hatchwar_auto_hatch.luau",
 	boss = "hatchwar_auto_boss.luau",
@@ -16,5 +24,8 @@ if not file then
 	error("[Loader] TARGET must be \"hatch\" or \"boss\" (got " .. tostring(TARGET) .. ")")
 end
 
-print("[Loader] loading " .. file .. " ...")
+-- hand the boss choice to the boss script before it loads (0 = auto)
+getgenv().HatchWarConfig = { TargetBoss = SELECTED_BOSS, PreferredZone = SELECTED_BOSS }
+
+print("[Loader] loading " .. file .. (TARGET == "boss" and (" (selected boss " .. SELECTED_BOSS .. ")") or "") .. " ...")
 loadstring(game:HttpGet(BASE .. file))()

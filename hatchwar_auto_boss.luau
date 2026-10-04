@@ -1,7 +1,8 @@
 -- Hatch Wars Auto Boss Fighter (Pet Simulator 99 - "Hatch Wars" event)
--- Auto-starts boss fights and instantly taps every fight circle ("Tap to hatch faster!" bars).
--- Teleports to the boss first: the server refuses fight starts unless you stand within ~12 studs
--- (it replies with "Walk up to the boss first!").
+-- Smart target-boss cycle: resolve ONE target boss, read ITS recommended luck/coin
+-- requirements, fight while luck >= that recommendation, drop to farming the middle
+-- Lucky Orb strip when it falls below, return to the same boss when recovered.
+-- Teleports to the boss first: the server refuses fight starts unless you stand within ~12 studs.
 -- Compatible with common executors (Synapse, Wave, Real, etc.).
 
 local Players = game:GetService("Players")
@@ -29,13 +30,13 @@ end
 
 local CONFIG = {
 	TapsPerSecond = 12,          -- server counts up to 15/s toward fight pace
-	MinWinChance = 0.5,          -- only auto-fight zones with at least this win chance
-	PreferredZone = 0,           -- 0 = auto pick; 1-4 = force that zone when available and affordable
+	MinWinChance = 0.5,          -- fallback auto-pick only accepts zones with at least this win chance
+	PreferredZone = 0,           -- 0 = auto; 1-4 = force that zone as the target when available
 	TargetBoss = 0,              -- 0 = auto; 1-4 = force that zone's boss (alias for PreferredZone)
 	FightDelay = 3,              -- seconds to wait after a fight ends before starting the next
 	StartCooldown = 5,           -- seconds before retrying a refused fight start
 	AutoJoin = true,             -- teleport into the Hatch Wars instance when outside
-	LowChanceFallback = true,    -- if no zone meets MinWinChance, grind the best affordable one (loss pity applies)
+	LowChanceFallback = true,    -- if no zone meets MinWinChance, fight the best affordable one (loss pity applies)
 	RespectGameAutoBattle = true,-- if the game's own AutoBattle is on, let it start fights (we still tap)
 	GameAutoGraceSeconds = 20,   -- but start one ourselves if the game auto starts nothing for this long
 	ComboBar = true,             -- show the fight combo progress bar
@@ -43,8 +44,26 @@ local CONFIG = {
 	TeleportToBoss = true,       -- tp next to the picked boss before starting (server refuses from far away)
 	TeleportStuds = 12,          -- skip the tp if already within this range of the boss
 	TeleportWait = 1.0,          -- seconds to settle after teleporting before starting the fight
-	AutoGrindCycle = true,        -- if Luck/coins low, auto-return to grinding and loop back to boss
+	LockTarget = true,           -- keep the same target boss unless it becomes unavailable
+	MinLuckFactor = 1.0,         -- fight while luck >= factor * the TARGET boss's recommended luck
+	AutoGrindCycle = true,       -- full cycle: fight -> luck low -> farm middle orbs -> fight again
+	BailTapsOnLowLuck = false,   -- false: keep tapping for the whole fight; luck can dip below rec mid-fight (hatching uses orbs), farming still runs right after the fight ends
+	GrindMonitorSeconds = 2,     -- sample Luck/meter cadence during a fight
+	GrindLogSeconds = 6,         -- progress print interval while farming
 }
+
+-- loader override: main.lua sets getgenv().HatchWarConfig before loading this
+-- file (e.g. { TargetBoss = 3 } to always fight a specific boss); unknown keys ignored
+do
+	local over = getgenv().HatchWarConfig
+	if type(over) == "table" then
+		for k, v in pairs(over) do
+			if CONFIG[k] ~= nil then
+				CONFIG[k] = v
+			end
+		end
+	end
+end
 
 local HatchWarCmds = require(Library.Client.HatchWarCmds)
 local Boss = require(Library.Client.HatchWarCmds.Boss)
@@ -55,9 +74,15 @@ local CurrencyCmds = require(Library.Client.CurrencyCmds)
 local HatchWar = require(Library.Types.HatchWar)
 local Save = require(Library.Client.Save)
 local InstancingCmds = require(Library.Client.InstancingCmds)
+local OrbsCmd = require(Library.Client.HatchWarCmds.Orbs)
+local HatchWarLuck = require(Library.Util.HatchWarLuck)
 
 local stats = { taps = 0, starts = 0, zone = 0 }
-local CYCLE = { state = "IDLE", lastLuck = 0, lastCoins = 0 }
+local CYCLE = { state = "IDLE", lastLuck = 0, lastCoins = 0, lastOrbs = 0 }
+local TARGET = nil
+local TARGET_UNREACHABLE = false
+local TAPS_PAUSED = false
+local luckNow
 local comboShown = false
 
 local function log(msg)
@@ -107,7 +132,6 @@ end
 
 local function pickZone()
 	local coins = CurrencyCmds.Get(HatchWar.COIN) or 0
-	-- TargetBoss: force a specific zone boss like Egg targets a specific egg
 	if CONFIG.TargetBoss >= 1 then
 		local z = CONFIG.TargetBoss
 		if zoneAvailable(z) and coins >= (Boss.Recommended(z) or 0) then
@@ -138,50 +162,245 @@ local function pickZone()
 	return CONFIG.LowChanceFallback and fallback or nil
 end
 
+-- === target boss: resolve once, keep it unless unavailable or config selects another ===
+local function resolveTarget()
+	if CONFIG.TargetBoss >= 1 and zoneAvailable(CONFIG.TargetBoss) then
+		return CONFIG.TargetBoss, "config TargetBoss"
+	end
+	if CONFIG.PreferredZone >= 1 and zoneAvailable(CONFIG.PreferredZone) then
+		return CONFIG.PreferredZone, "config PreferredZone"
+	end
+	for z = #HatchWar.ZONES, 1, -1 do
+		if zoneAvailable(z) then
+			return z, "highest unlocked"
+		end
+	end
+	return 1, "fallback"
+end
+
+local function targetReqs(t)
+	local coins, recLuck = Boss.Recommended(t)
+	return (tonumber(coins) or 0), (tonumber(recLuck) or 0)
+end
+
+local function targetZone()
+	if not CONFIG.LockTarget then
+		return pickZone() or (select(1, resolveTarget()))
+	end
+	if TARGET then
+		if zoneAvailable(TARGET) then
+			return TARGET
+		end
+		log(("target zone %d unavailable - re-evaluating"):format(TARGET))
+		TARGET = nil
+		TARGET_UNREACHABLE = false
+	end
+	local z, src = resolveTarget()
+	TARGET = z
+	TARGET_UNREACHABLE = false
+	local needCoins, needLuck = targetReqs(z)
+	log(("target: zone %d %s [%s] requires %s coins / %s luck (you have %s luck)"):format(
+		z, HatchWar.ZONES[z].Boss, src, short(needCoins), short(needLuck), short(luckNow(z))))
+	return z
+end
+
 local function charHRP()
 	local char = LocalPlayer.Character
 	return char and char:FindFirstChild("HumanoidRootPart")
--- Boss Fight / Grinding System: Monitor Luck and meter, auto-return to grinding when low
+end
+
+-- === live resource readers (Luck, orb meter, coins) ===
 local GRIND = {
-	MinCoins = 500,         -- minimum coins required to enter boss fight
-	MinLuck = 10,           -- absolute minimum Luck below which we must grind
-	MaxLuckDrop = 0.8,      -- when Luck falls below 80% of the luck we had at load time, stop fighting
-	GrindAreaPosition = nil -- position of middle grinding area (recorded on first teleport-to-grind)
+	MinCoins = 0,       -- hard minimum coins; 0 = use the target boss's own entry cost
+	MinOrbs = 400,      -- carried Lucky Orbs below this = the meter ran out -> farm
 }
 
-local function getLuckStat()
-	local ok, v = pcall(function()
-		local EggCmds = require(game.ReplicatedStorage.Library.Client.EggCmds)
-		return EggCmds.ComputeLuckBoost(nil, nil)
+local function carriedOrbs()
+	local ok, v = pcall(CurrencyCmds.Get, HatchWar.ORB)
+	return (ok and tonumber(v)) or 0
+end
+
+local function orbCap()
+	local ok, _, cap = pcall(function()
+		return OrbsCmd.Bank()
 	end)
-	if ok and type(v) == "number" then return v end
-	-- fallback: read from Save / instance variables for TapHeroes Luck
-	local sv = Save.Get()
-	local luck = sv and sv.TapHeroes and sv.TapHeroes.Luck
-	return (type(luck) == "number") and luck or 50
-end
-
-local function inGrindingArea()
-	local hrp = charHRP()
-	if not hrp then return false end
-	if not GRIND.GrindAreaPosition then
-		-- record current position as "middle grinding area" on first check
-		GRIND.GrindAreaPosition = hrp.Position
+	if ok and tonumber(cap) and cap > 0 then
+		return cap
 	end
-	-- within 30 studs of recorded grind position = considered "grinding"
-	return (hrp.Position - GRIND.GrindAreaPosition).Magnitude < 30
+	local attr = tonumber(LocalPlayer:GetAttribute(HatchWar.TAG_ATTRIBUTES.OrbBank))
+	if attr and attr > 0 then
+		return attr
+	end
+	return 8100
 end
 
-local function goToGrindingArea()
-	if not GRIND.GrindAreaPosition then return false, "no grind position set" end
+function luckNow(zone)
+	zone = (type(zone) == "number" and zone >= 1) and zone or 1
+	local ok, v = pcall(function()
+		return Boss.PlayerLuck(zone)
+	end)
+	if ok and type(v) == "number" then
+		return v
+	end
+	local attr = tonumber(LocalPlayer:GetAttribute(HatchWar.LUCK_ATTRIBUTE))
+	if attr then
+		return attr
+	end
+	local ok2, r = pcall(function()
+		return HatchWarLuck.Compute(LocalPlayer, {}).Luck
+	end)
+	return (ok2 and type(r) == "number" and r) or 0
+end
+
+local function minCoinsFor(t)
+	if GRIND.MinCoins > 0 then
+		return GRIND.MinCoins
+	end
+	local coins = targetReqs(t)
+	return coins
+end
+
+-- true when the TARGET boss's requirements are not met -> farm
+-- returns low, human reason, reason key ("luck" | "orbs" | "coins")
+local function resourceLow()
+	local t = targetZone()
+	local needCoins, needLuck = targetReqs(t)
+	local luck = luckNow(t)
+	if luck >= needLuck * CONFIG.MinLuckFactor then
+		TARGET_UNREACHABLE = false
+	end
+	if not TARGET_UNREACHABLE and luck < needLuck * CONFIG.MinLuckFactor then
+		return true, ("target %d: luck %d < %d"):format(t, math.floor(luck), math.floor(needLuck * CONFIG.MinLuckFactor)), "luck"
+	end
+	local orbs = carriedOrbs()
+	if orbs < GRIND.MinOrbs then
+		return true, ("target %d: orbs %d < %d"):format(t, orbs, GRIND.MinOrbs), "orbs"
+	end
+	local coins = CurrencyCmds.Get(HatchWar.COIN) or 0
+	local floorCoins = minCoinsFor(t)
+	if coins < floorCoins then
+		return true, ("target %d: coins %s < %s"):format(t, short(coins), short(floorCoins)), "coins"
+	end
+	return false, nil, nil
+end
+
+local function nearestOrb()
+	local folder = workspace:FindFirstChild("__DEBRIS")
+	folder = folder and folder:FindFirstChild("HatchWarOrbs")
+	if not folder then
+		return nil, nil
+	end
 	local hrp = charHRP()
-	if not hrp then return false, "no character" end
-	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.CFrame = CFrame.new(GRIND.GrindAreaPosition + Vector3.new(0, 3, 5))
-	return true, "returned to middle grinding area"
+	if not hrp then
+		return nil, nil
+	end
+	local best, bestD = nil, math.huge
+	for _, p in ipairs(folder:GetChildren()) do
+		local pp = p:IsA("BasePart") and p.Position or (p:IsA("Model") and p:GetPivot().Position or nil)
+		if pp then
+			local d = (pp - hrp.Position).Magnitude
+			if d < bestD then
+				best, bestD = pp, d
+			end
+		end
+	end
+	return best, bestD
 end
 
+local PATROL = nil
+local patrolIndex = 1
+local function patrolPoints()
+	if PATROL then
+		return PATROL
+	end
+	PATROL = {}
+	local inst = HatchWarCmds.Instance()
+	local model = inst and inst.model
+	local INTERACT = model and model:FindFirstChild("INTERACT")
+	local oa = INTERACT and INTERACT:FindFirstChild("OrbAreas")
+	local sum = Vector3.zero
+	if oa then
+		for _, c in ipairs(oa:GetChildren()) do
+			local p = c:IsA("BasePart") and c.Position or (c:IsA("Model") and c:GetPivot().Position or nil)
+			if p then
+				PATROL[#PATROL + 1] = p
+				sum += p
+			end
+		end
+	end
+	if #PATROL > 0 then
+		PATROL[#PATROL + 1] = sum / #PATROL
+	else
+		PATROL[1] = Vector3.new(6480, 17, 21998)
+	end
+	return PATROL
+end
 
+local lastGrindLogAt = 0
+local moveTarget, moveLastAt = nil, 0
+local walkPos, walkProgressAt = nil, 0
+local patrolAt = 0
+local function grindStep()
+	local hrp = charHRP()
+	if not hrp then
+		return false, "no character"
+	end
+	local char = LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then
+		return false, "no humanoid"
+	end
+	local now = os.clock()
+
+	-- walk to the nearest Lucky Orb (or patrol the middle strip when none exist);
+	-- no CFrame/velocity writes - the game's proximity pickup collects on arrival,
+	-- so the server only ever sees normal walking speed
+	local pos, dist = nearestOrb()
+	local target
+	if pos then
+		target = pos
+	else
+		local pts = patrolPoints()
+		local p = pts[patrolIndex]
+		local flat = hrp.Position - p
+		if Vector3.new(flat.X, 0, flat.Z).Magnitude <= 6 or now - patrolAt > 8 then
+			patrolIndex = (patrolIndex % #pts) + 1
+			patrolAt = now
+			p = pts[patrolIndex]
+		end
+		target = p
+	end
+
+	if not moveTarget or (target - moveTarget).Magnitude > 2 or now - moveLastAt >= 2 then
+		moveTarget, moveLastAt = target, now
+		pcall(function()
+			hum:MoveTo(target)
+		end)
+	end
+
+	if not walkPos or (hrp.Position - walkPos).Magnitude > 1 then
+		walkPos = hrp.Position
+		walkProgressAt = now
+	elseif now - walkProgressAt > 3 then
+		walkProgressAt = now
+		moveLastAt = 0
+		pcall(function()
+			hum.Jump = true
+		end)
+	end
+	return true, pos and ("walk to orb " .. math.floor(dist) .. " studs") or "walk patrol middle"
+end
+
+local function grindProgressLog(why)
+	local now = os.clock()
+	if now - lastGrindLogAt >= CONFIG.GrindLogSeconds then
+		lastGrindLogAt = now
+		local t = targetZone()
+		local _, rec = targetReqs(t)
+		log(("farming: orbs=%d/%d luck=%s/%s coins=%s (%s)"):format(
+			carriedOrbs(), orbCap(), short(luckNow(t)), short(rec),
+			short(CurrencyCmds.Get(HatchWar.COIN) or 0), why or "low"))
+	end
 end
 
 local function bossPosition(z)
@@ -254,10 +473,11 @@ local function tapCircle()
 end
 
 -- tap loop: pop one live circle per tick, paced just under the server's click cap
+-- pauses instantly when the mid-fight monitor flags luck below the target's recommendation
 task.spawn(function()
 	while isAlive() do
 		task.wait(0.05)
-		if Boss.IsFighting() and Circles.Count() > 0 then
+		if Boss.IsFighting() and not TAPS_PAUSED and Circles.Count() > 0 then
 			local ok = pcall(function()
 				return Circles.TapOldest(tapCircle)
 			end)
@@ -271,12 +491,14 @@ task.spawn(function()
 	end
 end)
 
--- fight loop: join, pick a zone, tp to boss, start fights, repeat
+-- cycle loop: resolve target -> monitor its requirements -> farm when low -> fight when met
 task.spawn(function()
 	local notFightingSince = os.clock()
 	local nextStartAt = 0
 	local lastGameAutoAt = os.clock()
-	local luckBaseline = 0
+	local lastMonitorAt = 0
+	local wasGrinding = false
+	local bailLogged = false
 	while isAlive() do
 		task.wait(0.4)
 		if not inEvent() then
@@ -292,9 +514,64 @@ task.spawn(function()
 		if Boss.IsFighting() then
 			notFightingSince = os.clock()
 			lastGameAutoAt = os.clock()
+			wasGrinding = false
+			CYCLE.state = "FIGHTING"
+			if CONFIG.AutoGrindCycle and os.clock() - lastMonitorAt >= CONFIG.GrindMonitorSeconds then
+				lastMonitorAt = os.clock()
+				local low, why, reason = resourceLow()
+				if low then
+					if CONFIG.BailTapsOnLowLuck and reason == "luck" then
+						TAPS_PAUSED = true
+						if not bailLogged then
+							bailLogged = true
+							log(("mid-fight monitor: %s -> stopped tapping, farm after this fight"):format(why))
+						end
+					elseif not bailLogged then
+						bailLogged = true
+						log(("mid-fight monitor: %s -> farm after this fight"):format(why))
+					end
+				elseif TAPS_PAUSED then
+					TAPS_PAUSED = false
+					log("mid-fight monitor: requirements met again - resuming taps")
+				end
+			end
 			continue
 		end
 		comboShown = false
+		TAPS_PAUSED = false
+		bailLogged = false
+
+		if CONFIG.AutoGrindCycle then
+			local low, why = resourceLow()
+			if low then
+				if not wasGrinding then
+					wasGrinding = true
+					CYCLE.state = "FARMING"
+					log(("farm: %s -> collecting Lucky Orbs in the middle area"):format(why))
+				end
+				local t = targetZone()
+				if not TARGET_UNREACHABLE and carriedOrbs() >= orbCap() - 1 then
+					local _, rec = targetReqs(t)
+					if luckNow(t) < rec * CONFIG.MinLuckFactor then
+						TARGET_UNREACHABLE = true
+						log(("target %d luck unreachable at orb cap - falling back to best fightable zone"):format(t))
+					end
+				end
+				grindStep()
+				grindProgressLog(why)
+				nextStartAt = os.clock() + 0.5
+				continue
+			elseif wasGrinding then
+				wasGrinding = false
+				CYCLE.state = "REPLENISHING"
+				local t = targetZone()
+				local _, rec = targetReqs(t)
+				log(("restored: target %d luck %s >= %s, orbs=%d, coins=%s -> returning to boss"):format(
+					t, short(luckNow(t)), short(rec), carriedOrbs(),
+					short(CurrencyCmds.Get(HatchWar.COIN) or 0)))
+			end
+		end
+
 		local idle = os.clock() - notFightingSince
 		if idle < CONFIG.FightDelay or os.clock() < nextStartAt then
 			continue
@@ -305,25 +582,15 @@ task.spawn(function()
 		if letGameStart then
 			continue
 		end
-		-- Monitor Luck and meter: if too low or out of coins, stop and return to grinding
-		if luckBaseline == 0 then
-			luckBaseline = getLuckStat()
-		end
-		local luck = getLuckStat()
-		local coins = CurrencyCmds.Get(HatchWar.COIN) or 0
-		local tooLowLuck = (luck <= GRIND.MinLuck) or (luck < luckBaseline * GRIND.MaxLuckDrop)
-		if tooLowLuck or (coins < GRIND.MinCoins) then
-			if not inGrindingArea() then
-				local ok, msg = goToGrindingArea()
-				log(("grinding: luck=%d coins=%s -> %s"):format(math.floor(luck), short(coins), msg))
-			else
-				log(("grinding: luck=%d coins=%s (low) - waiting to replenish"):format(math.floor(luck), short(coins)))
+		local z
+		if CONFIG.LockTarget then
+			z = targetZone()
+			if TARGET_UNREACHABLE then
+				z = pickZone() or z
 			end
-			-- Wait until replenished (monitor loop continues automatically via the main loop)
-			nextStartAt = os.clock() + 4
-			continue
+		else
+			z = pickZone() or targetZone()
 		end
-		local z = pickZone()
 		if not z then
 			log("no affordable zone at " .. math.floor(CONFIG.MinWinChance * 100) .. "%+ chance - waiting for buffs")
 			nextStartAt = os.clock() + 6
@@ -346,7 +613,11 @@ task.spawn(function()
 		if started then
 			stats.starts += 1
 			stats.zone = z
-			log(("fight started: zone %d %s (%d%% chance)"):format(z, HatchWar.ZONES[z].Boss, math.floor((Boss.WinChance(z) or 0) * 100)))
+			CYCLE.state = "FIGHTING"
+			local _, rec = targetReqs(z)
+			log(("fight started: target zone %d %s (%d%% chance, luck %s >= %s)"):format(
+				z, HatchWar.ZONES[z].Boss, math.floor((Boss.WinChance(z) or 0) * 100),
+				short(luckNow(z)), short(rec)))
 		else
 			log(("start refused zone %d: %s"):format(z, tostring(errText)))
 			nextStartAt = os.clock() + CONFIG.StartCooldown
@@ -358,18 +629,26 @@ end)
 task.spawn(function()
 	while isAlive() do
 		task.wait(CONFIG.StatusSeconds)
+		local t = TARGET or 0
 		local z = stats.zone
 		local chance = z > 0 and math.floor((Boss.WinChance(z) or 0) * 100) or 0
-		local luck = getLuckStat()
-	CYCLE.lastLuck = luck
-	CYCLE.lastCoins = CurrencyCmds.Get(HatchWar.COIN) or 0
-	CYCLE.state = Boss.IsFighting() and "FIGHTING" or (inGrindingArea() and "GRINDING" or "REPLENISHING")
-	log(("cycle=%s fighting=%s zone=%d chance=%d%% coins=%s luck=%d wins=%s taps=%d starts=%d"):format(
-			CYCLE.state, tostring(Boss.IsFighting()), z, chance, short(CurrencyCmds.Get(HatchWar.COIN) or 0),
-			math.floor(luck), table.concat(bossWins(), ","), stats.taps, stats.starts))
+		local luck = luckNow(t >= 1 and t or 1)
+		local coins = CurrencyCmds.Get(HatchWar.COIN) or 0
+		local orbs = carriedOrbs()
+		local rec = t >= 1 and select(2, targetReqs(t)) or 0
+		CYCLE.lastLuck = luck
+		CYCLE.lastCoins = coins
+		CYCLE.lastOrbs = orbs
+		if Boss.IsFighting() then
+			CYCLE.state = "FIGHTING"
+		end
+		log(("cycle=%s target=%d fighting=%s zone=%d chance=%d%% coins=%s luck=%s/%s orbs=%d/%d wins=%s taps=%d starts=%d"):format(
+			CYCLE.state, t, tostring(Boss.IsFighting()), z, chance, short(coins),
+			short(luck), short(rec), orbs, orbCap(), table.concat(bossWins(), ","), stats.taps, stats.starts))
 	end
 end)
 
-log(("loaded: taps=%d/s minChance=%d%% autoJoin=%s tp=%s autoGrind=%s"):format(
+log(("loaded: taps=%d/s minChance=%d%% autoJoin=%s tp=%s lockTarget=%s autoGrind=%s luckGate=x%.2f rec"):format(
 	CONFIG.TapsPerSecond, math.floor(CONFIG.MinWinChance * 100),
-	tostring(CONFIG.AutoJoin), tostring(CONFIG.TeleportToBoss), tostring(CONFIG.AutoGrindCycle)))
+	tostring(CONFIG.AutoJoin), tostring(CONFIG.TeleportToBoss), tostring(CONFIG.LockTarget),
+	tostring(CONFIG.AutoGrindCycle), CONFIG.MinLuckFactor))

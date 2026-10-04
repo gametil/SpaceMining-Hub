@@ -1,45 +1,51 @@
 # PS99 Hatch Wars Scripts
 
-One-line description: auto boss fighter + event egg auto-hatcher for the "Hatch Wars" event in Pet Simulator 99 (placeId 8737899170).
+Auto boss fighter + event egg auto-hatcher for the "Hatch Wars" event in Pet Simulator 99 (placeId 8737899170).
 
-## How to run
-Paste either file into any Lua executor that supports Luau (Synapse, Wave, Real, etc.) while in the game, then execute. Re-executing a script stops its previous run (safe to restart).
+## How to run (one line)
+
+```lua
+loadstring(game:HttpGet('https://raw.githubusercontent.com/gametil/kaila-mastan-jontro-pati/refs/heads/main/main.lua'))()
+```
+
+Edit the top of `main.lua` before running:
+
+- `TARGET = "boss"` or `"hatch"` (do not run both at once - they move your character to different spots)
+- `SELECTED_BOSS = 0..4` (boss script only): which boss to fight
+  - `0` = auto (locked target = your highest unlocked zone / best fightable)
+  - `1` = Ember IBZ (Ember Cliffs)
+  - `2` = Spore Lulu (Spore Forest)
+  - `3` = Ghoul Aussie (Green Graveyard)
+  - `4` = Warlock Ahmad (Witching Hour)
 
 ## hatchwar_auto_boss.luau
-- **What it does**: Auto-starts boss fights and instantly taps every fight circle ("Tap to hatch faster!" bars). Teleports to the boss first (server requires ~12 studs).
-- **CONFIG options**:
-  - TapsPerSecond: 12 (server counts up to 15/s)
-  - MinWinChance: 0.5 (only auto-fight zones with at least this win chance)
-  - PreferredZone: 0 (0 = auto pick; 1-4 = force that zone when available and affordable)
-  - TargetBoss: 0 (0 = auto; 1-4 = force that zone's boss — aliases PreferredZone; useful for targeting a specific boss slot directly)
-  - FightDelay: 3 (seconds to wait after a fight ends)
-  - StartCooldown: 5 (seconds before retrying a refused fight start)
-  - AutoJoin: true (teleport into Hatch Wars instance when outside)
-  - LowChanceFallback: true (grind best affordable zone if no zone meets MinWinChance)
-  - RespectGameAutoBattle: true (let game's AutoBattle start fights)
-  - GameAutoGraceSeconds: 20 (start one ourselves if game auto starts nothing for 20s)
-  - ComboBar: true (show fight combo progress bar)
-  - StatusSeconds: 10 (progress print interval)
-  - TeleportToBoss: true (tp next to picked boss before starting)
-  - TeleportStuds: 12 (skip tp if already within this range)
-  - TeleportWait: 1.0 (seconds to settle after teleporting)
+
+- **Cycle**: reads the target boss's own requirements (coins + recommended luck), fights only while your luck is at/above that recommendation, and when you drop below it farms Lucky Orbs - then returns to the SAME target boss. Wins/losses, luck and orb progress print on a status line.
+- **Farming walks, never teleports**: the character runs to the nearest Lucky Orb with normal `Humanoid:MoveTo` walking (auto-jump if stuck); the game's proximity pickup collects them, so the server only ever sees regular movement. The single exception is one short teleport next to the boss right before a fight (server refuses starts from far away) - set `TeleportToBoss = false` to disable it and walk there instead.
+- **Tapping**: pops every fight circle at 12 taps/s (server cap 15/s) for the whole fight; the combo progress bar shows like a normal player's.
+- **Key CONFIG**:
+  - TapsPerSecond: 12
+  - MinWinChance: 0.5 (fallback auto-pick only accepts zones with at least this chance)
+  - TargetBoss / PreferredZone: 0 (0 = auto; 1-4 = force that boss; set by the loader's SELECTED_BOSS)
+  - LockTarget: true (keep the same target boss unless it becomes unavailable)
+  - MinLuckFactor: 1.0 (fight while luck >= factor x the boss's recommended luck)
+  - AutoGrindCycle: true (fight -> luck low -> farm orbs -> fight again)
+  - TeleportToBoss: true (short tp next to the boss before starting)
+  - AutoJoin: true (enter the Hatch Wars instance when outside)
+  - StatusSeconds: 10 / GrindLogSeconds: 6 (print intervals)
+  - FightDelay: 3, StartCooldown: 5, ComboBar: true
 
 ## hatchwar_auto_hatch.luau
-- **What it does**: Auto-hatches one of the four Hatch Wars event eggs (Ember, Spore, Graveyard, Witching) by teleporting next to it and keeping the game's Auto Hatch chain running.
-- **CONFIG table**:
-  - Egg: "Ember Egg" (egg name or "" to stop)
-  - AutoJoin: true (teleport into Hatch Wars instance when outside)
-  - TeleportToEgg: true (tp next to the egg)
-  - TeleportStuds: 13 (skip tp if already within 13 studs)
-  - TeleportWait: 0.6 (seconds to settle after teleporting)
-  - RestartDelay: 2 (retry pause after failure)
-  - NoCoinsDelay: 10 (wait this long when broke)
-  - StatusSeconds: 10 (progress print interval)
 
-**Note**: Witching Egg may reply "You don't have permission to hatch this!" until you progress the event — the script stops and tells you instead of spamming retries.
+- **What it does**: auto-hatches one of the four Hatch Wars event eggs (Ember, Spore, Graveyard, Witching) by teleporting next to it (server needs ~15 studs) and keeping the game's Auto Hatch chain running.
+- **CONFIG**: Egg ("Ember Egg" / "" to stop), AutoJoin, TeleportToEgg, TeleportStuds, TeleportWait, RestartDelay, NoCoinsDelay, StatusSeconds.
+
+**Note**: the Witching Egg may reply "You don't have permission to hatch this!" until you progress the event - the script stops and tells you instead of spamming retries.
 
 ## Important
-Do NOT run both scripts at the same time — they teleport your character to different spots on the same strip (bosses vs eggs) and will fight over position. Pick one.
+
+Do NOT run both scripts at the same time - they use the same character for different spots (bosses vs eggs). Pick one.
 
 ## Disclaimer
+
 Educational/use at your own risk; scripts only interact through the game's own client APIs and remotes. No warranties given.
